@@ -106,7 +106,7 @@ async def get_kakao_login_url():
         f"?client_id={settings.KAKAO_CLIENT_ID}"
         f"&redirect_uri={settings.KAKAO_REDIRECT_URI}"
         f"&response_type=code"
-        f"&scope=openid,profile_nickname,account_email,phone_number"
+        f"&scope={settings.KAKAO_SCOPES}"
     )
     return {"login_url": url}
 
@@ -157,10 +157,34 @@ async def kakao_callback(
     id_payload = await verify_kakao_id_token(id_token)
 
     kakao_id = str(id_payload["sub"])
-    kakao_name = id_payload.get("nickname", "카카오사용자")
+    kakao_name = id_payload.get("nickname")
     kakao_email = id_payload.get("email")
-    kakao_phone = id_payload.get("phone_number")  # +82 10-xxxx-xxxx 형식
+    kakao_phone = id_payload.get("phone_number")  # +82 10-xxxx-xxxx 형식 (비즈앱 필요)
     kakao_profile_image = id_payload.get("picture")
+
+    # openid만 있으면 nickname이 없을 수 있음 → 카카오 사용자 API로 보충
+    if not kakao_name:
+        access_token_str = token_json.get("access_token")
+        if access_token_str:
+            try:
+                async with httpx.AsyncClient() as client:
+                    user_resp = await client.get(
+                        f"{KAKAO_API_URL}/v2/user/me",
+                        headers={"Authorization": f"Bearer {access_token_str}"},
+                    )
+                    if user_resp.status_code == 200:
+                        user_info = user_resp.json()
+                        props = user_info.get("properties", {})
+                        account = user_info.get("kakao_account", {})
+                        kakao_name = props.get("nickname") or account.get("profile", {}).get("nickname")
+                        if not kakao_email:
+                            kakao_email = account.get("email")
+                        if not kakao_profile_image:
+                            kakao_profile_image = props.get("profile_image") or account.get("profile", {}).get("profile_image_url")
+            except Exception as e:
+                logger.warning(f"Failed to fetch Kakao user info as fallback: {e}")
+
+    kakao_name = kakao_name or "카카오사용자"
 
     # 전화번호 정규화 (+82 10-1234-5678 → 010-1234-5678)
     if kakao_phone:

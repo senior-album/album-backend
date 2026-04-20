@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     KAKAO_CLIENT_ID: str = ""
     KAKAO_CLIENT_SECRET: str = ""
     KAKAO_REDIRECT_URI: str = "http://localhost:5173/auth/kakao/callback"
+    KAKAO_SCOPES: str = "openid"  # 비즈앱 전환 후: "openid,profile_nickname,account_email,phone_number"
 
     # 카카오 비즈톡 (알림톡)
     BIZZTALK_SENDER_KEY: str = ""
