@@ -159,18 +159,23 @@ async def get_facility_photos(
         except Exception as e:
             logger.error(f"[facility_photos] _enrich_photos_with_residents failed: {e}", exc_info=True)
             # fallback: 기본 dict로 반환 (response_model 없으므로 안전)
+            from app.core.storage import get_storage
+            storage = get_storage()
             fallback = []
             for p in photos:
                 try:
-                    fallback.append(PhotoResponse.model_validate(p).model_dump())
+                    resp = PhotoResponse.model_validate(p).model_dump()
+                    resp["original_url"] = storage.to_presigned(resp["original_url"])
+                    if resp.get("thumbnail_url"):
+                        resp["thumbnail_url"] = storage.to_presigned(resp["thumbnail_url"])
+                    fallback.append(resp)
                 except Exception as ve:
                     logger.error(f"[facility_photos] PhotoResponse validation failed for photo {p.id}: {ve}")
-                    # 최소한의 정보만 반환
                     fallback.append({
                         "id": p.id,
                         "facility_id": p.facility_id,
-                        "original_url": p.original_url,
-                        "thumbnail_url": p.thumbnail_url or p.original_url,
+                        "original_url": storage.to_presigned(p.original_url),
+                        "thumbnail_url": storage.to_presigned(p.thumbnail_url or p.original_url),
                         "is_processed": getattr(p, 'is_processed', False),
                         "processing_status": getattr(p, 'processing_status', 'unknown'),
                         "created_at": p.created_at.isoformat() if p.created_at else None,

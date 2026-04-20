@@ -31,6 +31,23 @@ class StorageService:
         )
         self.bucket = settings.MINIO_BUCKET
         self.endpoint_url = endpoint_url
+
+        # 외부 접근용 presigned URL 클라이언트
+        if settings.MINIO_EXTERNAL_ENDPOINT:
+            external_url = settings.MINIO_EXTERNAL_ENDPOINT
+            if not external_url.startswith("http"):
+                external_url = f"https://{external_url}"
+            self.external_client = boto3.client(
+                "s3",
+                endpoint_url=external_url,
+                aws_access_key_id=settings.MINIO_ACCESS_KEY,
+                aws_secret_access_key=settings.MINIO_SECRET_KEY,
+                config=BotoConfig(signature_version="s3v4"),
+                region_name="us-east-1",
+            )
+        else:
+            self.external_client = self.client
+
         self._ensure_bucket()
 
     def _ensure_bucket(self):
@@ -87,9 +104,35 @@ class StorageService:
         """Get the public URL for an object."""
         return f"{self.endpoint_url}/{self.bucket}/{object_key}"
 
+    def extract_object_key(self, url: str) -> str | None:
+        """URL에서 object key 추출"""
+        if not url:
+            return None
+        bucket_prefix = f"{self.endpoint_url}/{self.bucket}/"
+        if url.startswith(bucket_prefix):
+            return url[len(bucket_prefix):]
+        # http://minio:9000/bucket/key 등 다양한 내부 URL 처리
+        parts = url.split(f"/{self.bucket}/", 1)
+        if len(parts) == 2:
+            return parts[1]
+        # 이미 object key인 경우
+        if not url.startswith("http"):
+            return url
+        return None
+
+    def to_presigned(self, url: str, expires_in: int = 3600) -> str:
+        """기존 URL을 presigned URL로 변환. 변환 실패 시 원본 반환."""
+        key = self.extract_object_key(url)
+        if key:
+            try:
+                return self.get_presigned_url(key, expires_in)
+            except Exception:
+                pass
+        return url
+
     def get_presigned_url(self, object_key: str, expires_in: int = 3600) -> str:
-        """Get a presigned URL for temporary access."""
-        return self.client.generate_presigned_url(
+        """Get a presigned URL for temporary access (외부 클라이언트 사용)."""
+        return self.external_client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": object_key},
             ExpiresIn=expires_in,
@@ -98,17 +141,7 @@ class StorageService:
     async def download_file(self, url_or_key: str) -> bytes | None:
         """Download a file from storage. Accepts either a full URL or object key."""
         try:
-            # URL에서 object key 추출
-            key = url_or_key
-            bucket_prefix = f"{self.endpoint_url}/{self.bucket}/"
-            if url_or_key.startswith(bucket_prefix):
-                key = url_or_key[len(bucket_prefix):]
-            elif url_or_key.startswith("http"):
-                # 다른 형태의 URL인 경우 bucket/key 부분 추출
-                parts = url_or_key.split(f"/{self.bucket}/", 1)
-                if len(parts) == 2:
-                    key = parts[1]
-
+            key = self.extract_object_key(url_or_key) or url_or_key
             response = self.client.get_object(Bucket=self.bucket, Key=key)
             return response["Body"].read()
         except Exception as e:

@@ -83,6 +83,10 @@ async def _enrich_photos_with_residents(
         my_likes_result = await db.execute(my_likes_stmt)
         my_likes_set = {row[0] for row in my_likes_result.all()}
 
+    # presigned URL 변환용 storage
+    from app.core.storage import get_storage
+    storage = get_storage()
+
     responses = []
     for p in photos:
         resp = PhotoResponse.model_validate(p)
@@ -100,6 +104,10 @@ async def _enrich_photos_with_residents(
                     resident_name=r_name,
                 )
             ]
+        # URL을 presigned URL로 변환
+        resp.original_url = storage.to_presigned(resp.original_url)
+        if resp.thumbnail_url:
+            resp.thumbnail_url = storage.to_presigned(resp.thumbnail_url)
         responses.append(resp)
 
     return responses
@@ -142,17 +150,16 @@ async def upload_photos(
             content_type = file.content_type or "image/jpeg"
             filename = file.filename or "photo.jpg"
 
-            # 1) MinIO에 원본 업로드
+            # 1) MinIO에 원본 업로드 → object key만 저장
             object_key = await storage.upload_file(
                 file_data=file_data,
                 filename=filename,
                 content_type=content_type,
                 facility_id=facility_id,
             )
-            photo_url = storage.get_url(object_key)
 
-            # 2) 섬네일 생성 및 업로드
-            thumbnail_url = photo_url
+            # 2) 섬네일 생성 및 업로드 → object key만 저장
+            thumb_key = object_key  # 섬네일 실패 시 원본 키 사용
             try:
                 img = PILImage.open(BytesIO(file_data)).convert("RGB")
                 img_thumb = img.copy()
@@ -167,16 +174,15 @@ async def upload_photos(
                     content_type="image/jpeg",
                     facility_id=f"{facility_id}/thumbnails",
                 )
-                thumbnail_url = storage.get_url(thumb_key)
             except Exception as e:
                 logger.warning(f"Thumbnail generation failed: {e}")
 
-            # 3) DB에 사진 레코드 저장 (미분류 상태)
+            # 3) DB에 사진 레코드 저장 (object key만 저장)
             photo = Photo(
                 id=str(uuid.uuid4()),
                 facility_id=facility_id,
-                original_url=photo_url,
-                thumbnail_url=thumbnail_url,
+                original_url=object_key,
+                thumbnail_url=thumb_key,
                 is_processed=False,
                 processing_status="queued",
                 upload_source="api",
@@ -228,8 +234,8 @@ async def upload_photos(
         "photos": [
             {
                 "id": p.id,
-                "original_url": p.original_url,
-                "thumbnail_url": p.thumbnail_url,
+                "original_url": storage.to_presigned(p.original_url),
+                "thumbnail_url": storage.to_presigned(p.thumbnail_url) if p.thumbnail_url else None,
                 "processing_status": p.processing_status,
             }
             for p in uploaded_photos
@@ -615,17 +621,15 @@ async def _delete_photo(photo: Photo, db: AsyncSession, user_id: str):
     """사진 1건 삭제 — 스토리지 파일 + 관련 DB 레코드 모두 정리"""
     storage = get_storage()
 
-    # 스토리지에서 파일 삭제
-    for url in [photo.original_url, photo.thumbnail_url]:
-        if url:
+    # 스토리지에서 파일 삭제 (DB에 object key 직접 저장됨)
+    for key in [photo.original_url, photo.thumbnail_url]:
+        if key:
             try:
-                # URL에서 object key 추출
-                bucket_prefix = f"/{storage.bucket}/"
-                if bucket_prefix in url:
-                    key = url.split(bucket_prefix, 1)[1]
-                    await storage.delete_file(key)
+                # 기존 full URL 호환: URL이면 key 추출, 아니면 그대로 사용
+                actual_key = storage.extract_object_key(key) or key
+                await storage.delete_file(actual_key)
             except Exception as e:
-                logger.warning(f"[delete] Failed to delete file {url}: {e}")
+                logger.warning(f"[delete] Failed to delete file {key}: {e}")
 
     # 관련 레코드 삭제 (PhotoResident, PhotoFace, PhotoLike, PhotoShare)
     for model in [PhotoResident, PhotoFace, PhotoLike, PhotoShare]:
@@ -870,11 +874,14 @@ async def create_share_link(
 
     share_url = f"{settings.FRONTEND_URL}/shared/{share_token}"
 
+    from app.core.storage import get_storage
+    storage = get_storage()
+
     return {
         "share_token": share_token,
         "share_url": share_url,
-        "photo_url": photo_obj.original_url,
-        "thumbnail_url": photo_obj.thumbnail_url,
+        "photo_url": storage.to_presigned(photo_obj.original_url),
+        "thumbnail_url": storage.to_presigned(photo_obj.thumbnail_url) if photo_obj.thumbnail_url else None,
         "expires_at": expires_at.isoformat(),
     }
 
@@ -911,10 +918,13 @@ async def get_shared_photo(
     )
     like_count = like_count_result.scalar() or 0
 
+    from app.core.storage import get_storage
+    storage = get_storage()
+
     return {
         "photo_id": photo.id,
-        "original_url": photo.original_url,
-        "thumbnail_url": photo.thumbnail_url,
+        "original_url": storage.to_presigned(photo.original_url),
+        "thumbnail_url": storage.to_presigned(photo.thumbnail_url) if photo.thumbnail_url else None,
         "like_count": like_count,
         "created_at": photo.created_at.isoformat(),
     }

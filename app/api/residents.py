@@ -173,16 +173,14 @@ async def register_face(
         content_type=file.content_type or "image/jpeg",
         facility_id=f"{resident.facility_id}/faces",
     )
-    photo_url = storage.get_url(object_key)
-
-    # OpenSearch에 reference embedding 저장 (photo_url 포함)
+    # OpenSearch에 reference embedding 저장 (object key 저장)
     doc_id = str(uuid.uuid4())
     OpenSearchService.store_embedding(
         doc_id=doc_id,
         embedding=embedding,
         resident_id=resident_id,
         facility_id=resident.facility_id,
-        photo_url=photo_url,
+        photo_url=object_key,
         is_reference=True,
     )
 
@@ -250,7 +248,7 @@ async def register_face(
         "resident_id": resident_id,
         "resident_name": resident.name,
         "embedding_id": doc_id,
-        "photo_url": photo_url,
+        "photo_url": storage.to_presigned(object_key),
         "reclassified_photos": reclassified_count,
     }
 
@@ -274,6 +272,11 @@ async def get_resident_faces(
             resident_id=resident_id,
             facility_id=resident.facility_id,
         )
+        # face의 photo_url을 presigned URL로 변환
+        storage = get_storage()
+        for face in faces:
+            if face.get("photo_url"):
+                face["photo_url"] = storage.to_presigned(face["photo_url"])
         return {
             "resident_id": resident_id,
             "resident_name": resident.name,
@@ -333,4 +336,14 @@ async def get_resident_photos(
     )
     result = await db.execute(stmt)
     photos = result.scalars().all()
-    return [PhotoResponse.model_validate(p) for p in photos]
+
+    from app.core.storage import get_storage
+    storage = get_storage()
+    responses = []
+    for p in photos:
+        resp = PhotoResponse.model_validate(p)
+        resp.original_url = storage.to_presigned(resp.original_url)
+        if resp.thumbnail_url:
+            resp.thumbnail_url = storage.to_presigned(resp.thumbnail_url)
+        responses.append(resp)
+    return responses

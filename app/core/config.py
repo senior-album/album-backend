@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "senior-album-photos"
     MINIO_USE_SSL: bool = False
+    MINIO_EXTERNAL_ENDPOINT: str = ""  # 외부 접근용 (presigned URL), 비어있으면 MINIO_ENDPOINT 사용
 
     # 사진 로컬 저장 (MinIO 없을 때 fallback)
     UPLOAD_DIR: str = "./uploads"

@@ -263,6 +263,9 @@ async def get_my_photos(
         matched_resident_ids = [rid for rid, _ in matched_pairs]
         matched_names = [rname for _, rname in matched_pairs]
 
+        from app.core.storage import get_storage
+        storage = get_storage()
+
         photo_results.append({
             "id": photo.id,
             "facility_id": photo.facility_id,
@@ -270,8 +273,8 @@ async def get_my_photos(
             "resident_name": ", ".join(matched_names) if matched_names else None,
             "matched_residents": matched_names,
             "matched_resident_ids": matched_resident_ids,
-            "original_url": photo.original_url,
-            "thumbnail_url": photo.thumbnail_url,
+            "original_url": storage.to_presigned(photo.original_url),
+            "thumbnail_url": storage.to_presigned(photo.thumbnail_url) if photo.thumbnail_url else None,
             "is_processed": photo.is_processed,
             "processing_status": photo.processing_status,
             "created_at": photo.created_at.isoformat(),
