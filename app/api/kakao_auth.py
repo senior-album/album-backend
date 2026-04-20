@@ -1,6 +1,6 @@
 """
-카카오 OAuth 인증 API
-카카오 로그인 → 사용자 생성/로그인 → JWT 발급
+카카오 OIDC 인증 API
+카카오 로그인 (OpenID Connect) → 사용자 생성/로그인 → JWT 발급
 """
 
 import uuid
@@ -9,6 +9,7 @@ import httpx
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
+from jose import jwt as jose_jwt, JWTError
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,73 @@ router = APIRouter(prefix="/auth/kakao", tags=["auth"])
 
 KAKAO_AUTH_URL = "https://kauth.kakao.com"
 KAKAO_API_URL = "https://kapi.kakao.com"
+KAKAO_JWKS_URL = "https://kauth.kakao.com/.well-known/jwks.json"
+KAKAO_ISSUER = "https://kauth.kakao.com"
+
+# JWKS 캐시
+_kakao_jwks: dict | None = None
+
+
+async def get_kakao_jwks() -> dict:
+    """카카오 JWKS 가져오기 (캐시 사용)"""
+    global _kakao_jwks
+    if _kakao_jwks is None:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(KAKAO_JWKS_URL)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=500, detail="카카오 JWKS를 가져올 수 없습니다.")
+            _kakao_jwks = resp.json()
+    return _kakao_jwks
+
+
+async def verify_kakao_id_token(id_token: str) -> dict:
+    """카카오 id_token 서명 검증 및 payload 반환"""
+    settings = get_settings()
+    jwks = await get_kakao_jwks()
+
+    # id_token 헤더에서 kid 추출
+    try:
+        header = jose_jwt.get_unverified_header(id_token)
+    except JWTError:
+        raise HTTPException(status_code=400, detail="유효하지 않은 ID 토큰입니다.")
+
+    kid = header.get("kid")
+    if not kid:
+        raise HTTPException(status_code=400, detail="ID 토큰에 kid가 없습니다.")
+
+    # kid에 맞는 공개키 찾기
+    rsa_key = None
+    for key in jwks.get("keys", []):
+        if key["kid"] == kid:
+            rsa_key = key
+            break
+
+    if not rsa_key:
+        # JWKS 캐시 갱신 후 재시도
+        global _kakao_jwks
+        _kakao_jwks = None
+        jwks = await get_kakao_jwks()
+        for key in jwks.get("keys", []):
+            if key["kid"] == kid:
+                rsa_key = key
+                break
+
+    if not rsa_key:
+        raise HTTPException(status_code=400, detail="ID 토큰 검증에 사용할 키를 찾을 수 없습니다.")
+
+    # 서명 검증 + payload 추출
+    try:
+        payload = jose_jwt.decode(
+            id_token,
+            rsa_key,
+            algorithms=["RS256"],
+            audience=settings.KAKAO_CLIENT_ID,
+            issuer=KAKAO_ISSUER,
+        )
+        return payload
+    except JWTError as e:
+        logger.error(f"Kakao ID token verification failed: {e}")
+        raise HTTPException(status_code=400, detail="ID 토큰 검증에 실패했습니다.")
 
 
 @router.get("/login-url")
@@ -38,7 +106,7 @@ async def get_kakao_login_url():
         f"?client_id={settings.KAKAO_CLIENT_ID}"
         f"&redirect_uri={settings.KAKAO_REDIRECT_URI}"
         f"&response_type=code"
-        f"&scope=profile_nickname,account_email,phone_number"
+        f"&scope=openid,profile_nickname,account_email,phone_number"
     )
     return {"login_url": url}
 
@@ -80,28 +148,19 @@ async def kakao_callback(
         raise HTTPException(status_code=400, detail="카카오 인증에 실패했습니다.")
 
     token_json = token_resp.json()
-    kakao_access_token = token_json["access_token"]
 
-    # 2) 액세스 토큰으로 사용자 정보 조회
-    async with httpx.AsyncClient() as client:
-        user_resp = await client.get(
-            f"{KAKAO_API_URL}/v2/user/me",
-            headers={"Authorization": f"Bearer {kakao_access_token}"},
-        )
+    # 2) id_token 검증 및 사용자 정보 추출 (OIDC)
+    id_token = token_json.get("id_token")
+    if not id_token:
+        raise HTTPException(status_code=400, detail="ID 토큰이 응답에 없습니다. OpenID Connect가 활성화되어 있는지 확인하세요.")
 
-    if user_resp.status_code != 200:
-        logger.error(f"Kakao user info failed: {user_resp.text}")
-        raise HTTPException(status_code=400, detail="카카오 사용자 정보를 가져올 수 없습니다.")
+    id_payload = await verify_kakao_id_token(id_token)
 
-    kakao_user = user_resp.json()
-    kakao_id = str(kakao_user["id"])
-    kakao_account = kakao_user.get("kakao_account", {})
-    profile = kakao_account.get("profile", {})
-
-    kakao_name = profile.get("nickname", "카카오사용자")
-    kakao_email = kakao_account.get("email")
-    kakao_phone = kakao_account.get("phone_number")  # +82 10-xxxx-xxxx 형식
-    kakao_profile_image = profile.get("profile_image_url")
+    kakao_id = str(id_payload["sub"])
+    kakao_name = id_payload.get("nickname", "카카오사용자")
+    kakao_email = id_payload.get("email")
+    kakao_phone = id_payload.get("phone_number")  # +82 10-xxxx-xxxx 형식
+    kakao_profile_image = id_payload.get("picture")
 
     # 전화번호 정규화 (+82 10-1234-5678 → 010-1234-5678)
     if kakao_phone:
