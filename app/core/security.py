@@ -9,12 +9,16 @@ from functools import wraps
 import logging
 
 from jose import JWTError, jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# 쿠키 설정 상수
+COOKIE_NAME = "access_token"
+COOKIE_MAX_AGE = 60 * 60 * 24 * 7  # 7일 (초 단위)
 
 # Firebase 인증 (현재 미사용 - 나중에 필요시 활성화)
 FIREBASE_AVAILABLE = False
@@ -84,15 +88,57 @@ class SecurityService:
             )
 
 
-# HTTP Bearer 스킴
-http_bearer = HTTPBearer()
+def set_auth_cookie(response: JSONResponse, token: str) -> JSONResponse:
+    """응답에 httpOnly 쿠키로 JWT 설정"""
+    settings = get_settings()
+    is_production = not settings.DEBUG
+
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        secure=is_production,          # 프로덕션에서만 Secure (HTTPS)
+        samesite="lax",                # CSRF 방지
+        path="/",
+    )
+    return response
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(http_bearer),
-) -> dict:
-    """현재 사용자 정보 조회"""
-    token = credentials.credentials
+def clear_auth_cookie(response: JSONResponse) -> JSONResponse:
+    """응답에서 인증 쿠키 삭제"""
+    settings = get_settings()
+    is_production = not settings.DEBUG
+
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        httponly=True,
+        secure=is_production,
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+async def get_current_user(request: Request) -> dict:
+    """현재 사용자 정보 조회 — 쿠키 우선, Authorization 헤더 fallback"""
+    token = None
+
+    # 1. 쿠키에서 토큰 읽기
+    token = request.cookies.get(COOKIE_NAME)
+
+    # 2. Authorization 헤더 fallback (API 클라이언트 등)
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+
     payload = SecurityService.verify_token(token)
 
     user_id = payload.get("sub")

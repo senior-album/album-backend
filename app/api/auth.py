@@ -10,24 +10,21 @@ from collections import defaultdict
 import time
 
 from fastapi import APIRouter, HTTPException, status, Depends, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from passlib.context import CryptContext
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.security import SecurityService, get_current_user
+from app.core.security import SecurityService, get_current_user, set_auth_cookie, clear_auth_cookie
 from app.core.redis import check_rate_limit, clear_rate_limit
 from app.models.models import User, Facility, Resident, Guardian
 from app.schemas.schemas import (
     LoginRequest,
-    LoginResponse,
-    UserResponse,
     RegisterAdminRequest,
     RegisterStaffRequest,
     RegisterGuardianRequest,
-    FacilityResponse,
-    DashboardStatsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,7 +94,7 @@ async def _check_rate_limit_redis(identifier: str):
         )
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login")
 async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(get_db)):
     """이메일/비밀번호 로그인 (시도 횟수 제한 포함)"""
     # IP + 이메일 기반 Rate Limiting (Redis 우선, fallback 인메모리)
@@ -170,11 +167,12 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
         "created_at": user.created_at,
     }
 
-    return {
-        "accessToken": access_token,
+    response = JSONResponse(content={
         "user": user_resp,
         "facility": facility_data,
-    }
+    })
+    set_auth_cookie(response, access_token)
+    return response
 
 
 @router.post("/register/admin")
@@ -224,8 +222,7 @@ async def register_admin(request: RegisterAdminRequest, db: AsyncSession = Depen
 
     logger.info(f"Admin registered: {request.email}, facility: {request.facilityName} ({facility_code})")
 
-    return {
-        "accessToken": access_token,
+    response = JSONResponse(content={
         "user": {
             "id": user_id,
             "email": request.email,
@@ -244,7 +241,9 @@ async def register_admin(request: RegisterAdminRequest, db: AsyncSession = Depen
             "phone": request.facilityPhone or "",
             "code": facility_code,
         },
-    }
+    })
+    set_auth_cookie(response, access_token)
+    return response
 
 
 @router.post("/register/staff")
@@ -286,8 +285,7 @@ async def register_staff(request: RegisterStaffRequest, db: AsyncSession = Depen
 
     logger.info(f"Staff registered: {request.email}, facility: {facility.name}")
 
-    return {
-        "accessToken": access_token,
+    response = JSONResponse(content={
         "user": {
             "id": user_id,
             "email": request.email,
@@ -306,7 +304,9 @@ async def register_staff(request: RegisterStaffRequest, db: AsyncSession = Depen
             "phone": facility.phone or "",
             "code": facility.code,
         },
-    }
+    })
+    set_auth_cookie(response, access_token)
+    return response
 
 
 @router.post("/register/guardian")
@@ -340,8 +340,7 @@ async def register_guardian(request: RegisterGuardianRequest, db: AsyncSession =
 
     logger.info(f"Guardian registered: {request.email}")
 
-    return {
-        "accessToken": access_token,
+    response = JSONResponse(content={
         "user": {
             "id": user_id,
             "email": request.email,
@@ -353,7 +352,9 @@ async def register_guardian(request: RegisterGuardianRequest, db: AsyncSession =
             "is_active": True,
             "created_at": user.created_at.isoformat() if user.created_at else None,
         },
-    }
+    })
+    set_auth_cookie(response, access_token)
+    return response
 
 
 @router.post("/refresh")
@@ -381,7 +382,17 @@ async def refresh_token(
         }
     )
 
-    return {"accessToken": new_token}
+    response = JSONResponse(content={"message": "Token refreshed"})
+    set_auth_cookie(response, new_token)
+    return response
+
+
+@router.post("/logout")
+async def logout():
+    """로그아웃 — 쿠키 삭제"""
+    response = JSONResponse(content={"message": "Logged out"})
+    clear_auth_cookie(response)
+    return response
 
 
 @router.get("/me")

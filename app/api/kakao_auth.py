@@ -8,12 +8,13 @@ import logging
 import httpx
 
 from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.security import SecurityService, get_current_user
+from app.core.security import SecurityService, get_current_user, set_auth_cookie
 from app.models.models import User, Facility
 
 logger = logging.getLogger(__name__)
@@ -183,8 +184,7 @@ async def kakao_callback(
                 "code": facility.code,
             }
 
-    return {
-        "accessToken": access_token,
+    response = JSONResponse(content={
         "isNewUser": is_new_user,
         "user": {
             "id": user.id,
@@ -199,7 +199,9 @@ async def kakao_callback(
             "created_at": user.created_at.isoformat() if user.created_at else None,
         },
         "facility": facility_data,
-    }
+    })
+    set_auth_cookie(response, access_token)
+    return response
 
 
 @router.post("/set-role")
@@ -293,8 +295,7 @@ async def set_role_after_kakao(
                 "code": fac.code,
             }
 
-    return {
-        "accessToken": access_token,
+    response = JSONResponse(content={
         "user": {
             "id": user.id,
             "email": user.email,
@@ -308,7 +309,9 @@ async def set_role_after_kakao(
             "created_at": user.created_at.isoformat() if user.created_at else None,
         },
         "facility": facility_data,
-    }
+    })
+    set_auth_cookie(response, access_token)
+    return response
 
 
 def normalize_phone(phone: str) -> str:

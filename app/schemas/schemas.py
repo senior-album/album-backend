@@ -16,11 +16,6 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class LoginResponse(BaseModel):
-    """로그인 응답"""
-    accessToken: str
-    user: "UserResponse"
-
 
 class RegisterAdminRequest(BaseModel):
     """시설 관리자 등록 (시설 생성 + 계정 생성)"""
