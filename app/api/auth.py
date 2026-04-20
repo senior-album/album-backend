@@ -164,7 +164,7 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
         "facility_id": user.facility_id,
         "phone": user.phone,
         "is_active": user.is_active,
-        "created_at": user.created_at,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
     response = JSONResponse(content={
