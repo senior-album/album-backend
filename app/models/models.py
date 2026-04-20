@@ -83,7 +83,7 @@ class Guardian(Base):
 
     id = Column(String(36), primary_key=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    resident_id = Column(String(36), ForeignKey("residents.id"), nullable=False, index=True)
+    resident_id = Column(String(36), ForeignKey("residents.id"), nullable=True, index=True)  # 시설코드 요청 시 null (시설에서 배정)
 
     resident = relationship("Resident", back_populates="guardians")
     user = relationship("User", foreign_keys="[Guardian.user_id]")
@@ -111,7 +111,8 @@ class Invitation(Base):
     id = Column(String(36), primary_key=True)
     facility_id = Column(String(36), ForeignKey("facilities.id"), nullable=False, index=True)
     resident_id = Column(String(36), ForeignKey("residents.id"), nullable=False, index=True)
-    phone = Column(String(20), nullable=False, index=True)  # 보호자 핸드폰 번호
+    phone = Column(String(20), nullable=True, index=True)  # 보호자 핸드폰 번호
+    email = Column(String(255), nullable=True, index=True)  # 보호자 이메일
     relationship_type = Column(String(50), nullable=True)
     message = Column(Text, nullable=True)  # 직원이 보내는 메시지
 

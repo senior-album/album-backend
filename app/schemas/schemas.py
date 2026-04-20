@@ -141,7 +141,7 @@ class GuardianResponse(BaseModel):
     """보호자 응답"""
     id: str
     user_id: str
-    resident_id: str
+    resident_id: Optional[str] = None
     relationship_type: Optional[str] = None
     request_message: Optional[str] = None
     is_approved: bool = False
@@ -176,21 +176,23 @@ class GuardianApprovalRequest(BaseModel):
     """보호자 승인/거부"""
     approved: bool
     reject_reason: Optional[str] = None
+    resident_id: Optional[str] = None  # 시설코드 요청 승인 시 입소자 배정
 
 
 class GuardianCreate(BaseModel):
     """보호자 생성"""
     user_id: str
-    resident_id: str
+    resident_id: Optional[str] = None
     relationship_type: Optional[str] = None
 
 
 # ==================== 초대 관련 스키마 ====================
 
 class InvitationCreate(BaseModel):
-    """보호자 초대 생성 (직원용)"""
+    """보호자 초대 생성 (직원용) — phone 또는 email 중 하나 필수"""
     resident_id: str
-    phone: str
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
     relationship_type: Optional[str] = None
     message: Optional[str] = None
 
@@ -200,7 +202,8 @@ class InvitationResponse(BaseModel):
     id: str
     facility_id: str
     resident_id: str
-    phone: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
     relationship_type: Optional[str] = None
     message: Optional[str] = None
     status: str
@@ -210,6 +213,13 @@ class InvitationResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class FacilityConnectionRequest(BaseModel):
+    """보호자가 시설코드로 연결 요청"""
+    facility_code: str
+    relationship_type: Optional[str] = None
+    message: Optional[str] = None
 
 
 # ==================== 사진 관련 스키마 ====================

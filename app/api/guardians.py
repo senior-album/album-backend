@@ -19,6 +19,7 @@ from app.schemas.schemas import (
     UserResponse,
     GuardianDetailResponse,
     GuardianApprovalRequest,
+    FacilityConnectionRequest,
 )
 
 router = APIRouter(prefix="/guardians", tags=["guardians"])
@@ -33,10 +34,11 @@ async def get_pending_guardians(
     db: AsyncSession = Depends(get_db),
 ):
     """승인 대기 중인 보호자 목록 (직원/관리자용)"""
+    from sqlalchemy.orm import aliased
     stmt = (
         select(Guardian, User, Resident)
         .join(User, Guardian.user_id == User.id)
-        .join(Resident, Guardian.resident_id == Resident.id)
+        .outerjoin(Resident, Guardian.resident_id == Resident.id)  # 시설코드 요청은 resident 없음
         .filter(
             Guardian.facility_id == facility_id,
             Guardian.is_approved == False,
@@ -62,7 +64,7 @@ async def get_pending_guardians(
             user_name=user.name,
             user_email=user.email,
             user_phone=user.phone,
-            resident_name=resident.name,
+            resident_name=resident.name if resident else "미배정",
         )
         for guardian, user, resident in rows
     ]
@@ -78,7 +80,7 @@ async def get_all_guardians(
     stmt = (
         select(Guardian, User, Resident)
         .join(User, Guardian.user_id == User.id)
-        .join(Resident, Guardian.resident_id == Resident.id)
+        .outerjoin(Resident, Guardian.resident_id == Resident.id)
         .filter(Guardian.facility_id == facility_id)
         .order_by(desc(Guardian.created_at))
     )
@@ -100,7 +102,7 @@ async def get_all_guardians(
             user_name=user.name,
             user_email=user.email,
             user_phone=user.phone,
-            resident_name=resident.name,
+            resident_name=resident.name if resident else "미배정",
         )
         for guardian, user, resident in rows
     ]
@@ -122,6 +124,24 @@ async def approve_or_reject_guardian(
         raise HTTPException(status_code=404, detail="보호자 요청을 찾을 수 없습니다.")
 
     if request.approved:
+        # 시설코드 요청 승인 시 resident_id가 필수
+        if not guardian.resident_id and not request.resident_id:
+            raise HTTPException(
+                status_code=400,
+                detail="시설코드 요청 승인 시 입소자를 배정해야 합니다. resident_id를 포함해주세요.",
+            )
+        if request.resident_id:
+            # 입소자 유효성 확인
+            res_stmt = select(Resident).filter(
+                Resident.id == request.resident_id,
+                Resident.facility_id == guardian.facility_id,
+                Resident.is_active == True,
+            )
+            res_result = await db.execute(res_stmt)
+            if not res_result.scalar_one_or_none():
+                raise HTTPException(status_code=404, detail="해당 입소자를 찾을 수 없습니다.")
+            guardian.resident_id = request.resident_id
+
         guardian.is_approved = True
         guardian.is_rejected = False
         guardian.approved_by = current_user["user_id"]
@@ -142,6 +162,55 @@ async def approve_or_reject_guardian(
 
 # ==================== 보호자 본인용 API ====================
 
+@router.post("/me/connect")
+async def request_facility_connection(
+    req: FacilityConnectionRequest,
+    current_user: dict = Depends(get_current_guardian),
+    db: AsyncSession = Depends(get_db),
+):
+    """보호자가 시설 코드로 연결 요청 (시설 직원이 승인)"""
+    # 시설 코드로 시설 조회
+    fac_stmt = select(Facility).filter(Facility.code == req.facility_code)
+    fac_result = await db.execute(fac_stmt)
+    facility = fac_result.scalar_one_or_none()
+    if not facility:
+        raise HTTPException(status_code=404, detail="유효하지 않은 시설 코드입니다.")
+
+    # 이미 해당 시설에 대기/승인 중인 요청이 있는지 확인
+    dup_stmt = select(Guardian).filter(
+        Guardian.user_id == current_user["user_id"],
+        Guardian.facility_id == facility.id,
+        Guardian.is_rejected == False,
+    )
+    dup_result = await db.execute(dup_stmt)
+    existing = dup_result.scalar_one_or_none()
+    if existing:
+        if existing.is_approved:
+            raise HTTPException(status_code=400, detail="이미 해당 시설과 연결되어 있습니다.")
+        else:
+            raise HTTPException(status_code=400, detail="이미 연결 요청이 대기 중입니다.")
+
+    # Guardian 레코드 생성 (승인 대기 — resident 미지정)
+    guardian = Guardian(
+        id=str(uuid.uuid4()),
+        user_id=current_user["user_id"],
+        resident_id=None,  # 시설에서 입소자 배정
+        facility_id=facility.id,
+        relationship_type=req.relationship_type,
+        request_message=req.message,
+        is_approved=False,
+        is_rejected=False,
+    )
+    db.add(guardian)
+    await db.commit()
+
+    return {
+        "message": f"{facility.name}에 연결 요청을 보냈습니다. 시설 직원의 승인을 기다려주세요.",
+        "facility_name": facility.name,
+        "guardian_id": guardian.id,
+    }
+
+
 @router.get("/me/status")
 async def get_my_approval_status(
     current_user: dict = Depends(get_current_guardian),
@@ -150,7 +219,7 @@ async def get_my_approval_status(
     """보호자 승인 상태 확인 (다중 시설/입소자 지원)"""
     stmt = (
         select(Guardian, Resident, Facility)
-        .join(Resident, Guardian.resident_id == Resident.id)
+        .outerjoin(Resident, Guardian.resident_id == Resident.id)
         .join(Facility, Guardian.facility_id == Facility.id)
         .filter(Guardian.user_id == current_user["user_id"])
     )
@@ -158,7 +227,7 @@ async def get_my_approval_status(
     rows = result.all()
 
     if not rows:
-        return {"status": "no_link", "message": "연결된 입소자가 없습니다.", "guardianships": []}
+        return {"status": "no_link", "message": "연결된 시설이 없습니다.", "guardianships": []}
 
     statuses = []
     for guardian, resident, facility in rows:
@@ -166,9 +235,10 @@ async def get_my_approval_status(
             "guardian_id": guardian.id,
             "facility_id": facility.id,
             "facility_name": facility.name,
-            "resident_id": resident.id,
-            "resident_name": resident.name,
+            "resident_id": resident.id if resident else None,
+            "resident_name": resident.name if resident else "미배정",
             "relationship_type": guardian.relationship_type,
+            "request_message": guardian.request_message,
             "is_approved": guardian.is_approved,
             "is_rejected": guardian.is_rejected,
             "reject_reason": guardian.reject_reason,

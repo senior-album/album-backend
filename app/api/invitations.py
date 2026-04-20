@@ -1,13 +1,14 @@
 """
 초대 API 엔드포인트
-- 직원: 보호자 초대 (핸드폰 번호로)
+- 직원: 보호자 초대 (전화번호 또는 이메일)
 - 보호자: 초대 확인 및 수락/거절
 """
 
 import uuid
+import logging
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy import select, desc, and_
+from sqlalchemy import select, desc, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -15,6 +16,8 @@ from app.core.security import get_current_user, get_current_guardian, get_curren
 from app.models.models import Invitation, Guardian, Resident, User, Facility
 from app.schemas.schemas import InvitationCreate, InvitationResponse
 from app.services.biztalk_service import BizTalkService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/invitations", tags=["invitations"])
 
@@ -27,10 +30,13 @@ async def create_invitation(
     current_user: dict = Depends(get_current_staff),
     db: AsyncSession = Depends(get_db),
 ):
-    """보호자 초대 (직원/관리자용) — 핸드폰 번호로 초대"""
+    """보호자 초대 (직원/관리자용) — 전화번호 또는 이메일로 초대"""
     facility_id = current_user.get("facility_id")
     if not facility_id:
         raise HTTPException(status_code=400, detail="시설 정보가 없습니다.")
+
+    if not req.phone and not req.email:
+        raise HTTPException(status_code=400, detail="전화번호 또는 이메일 중 하나는 필수입니다.")
 
     # 입소자 확인
     res_stmt = select(Resident).filter(
@@ -48,22 +54,30 @@ async def create_invitation(
     fac_result = await db.execute(fac_stmt)
     facility = fac_result.scalar_one_or_none()
 
-    # 중복 초대 확인 (같은 시설 + 같은 입소자 + 같은 번호로 pending 초대)
-    dup_stmt = select(Invitation).filter(
+    # 중복 초대 확인 (같은 시설 + 같은 입소자 + 같은 연락처로 pending 초대)
+    dup_filters = [
         Invitation.facility_id == facility_id,
         Invitation.resident_id == req.resident_id,
-        Invitation.phone == req.phone,
         Invitation.status == "pending",
-    )
+    ]
+    if req.phone and req.email:
+        dup_filters.append(or_(Invitation.phone == req.phone, Invitation.email == req.email))
+    elif req.phone:
+        dup_filters.append(Invitation.phone == req.phone)
+    else:
+        dup_filters.append(Invitation.email == req.email)
+
+    dup_stmt = select(Invitation).filter(*dup_filters)
     dup_result = await db.execute(dup_stmt)
     if dup_result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="이미 해당 번호로 대기 중인 초대가 있습니다.")
+        raise HTTPException(status_code=400, detail="이미 해당 연락처로 대기 중인 초대가 있습니다.")
 
     invitation = Invitation(
         id=str(uuid.uuid4()),
         facility_id=facility_id,
         resident_id=req.resident_id,
         phone=req.phone,
+        email=req.email,
         relationship_type=req.relationship_type,
         message=req.message,
         status="pending",
@@ -72,28 +86,29 @@ async def create_invitation(
     db.add(invitation)
     await db.commit()
 
-    # 카카오 알림톡 발송 (비즈톡 설정 시)
-    try:
-        inviter_stmt = select(User).filter(User.id == current_user["user_id"])
-        inviter_result = await db.execute(inviter_stmt)
-        inviter = inviter_result.scalar_one_or_none()
+    # 카카오 알림톡 발송 (전화번호가 있는 경우만)
+    if req.phone:
+        try:
+            inviter_stmt = select(User).filter(User.id == current_user["user_id"])
+            inviter_result = await db.execute(inviter_stmt)
+            inviter = inviter_result.scalar_one_or_none()
 
-        await BizTalkService.send_invitation_notification(
-            phone=req.phone,
-            facility_name=facility.name if facility else "시설",
-            resident_name=resident.name,
-            inviter_name=inviter.name if inviter else "직원",
-            message=req.message,
-        )
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"BizTalk notification failed: {e}")
+            await BizTalkService.send_invitation_notification(
+                phone=req.phone,
+                facility_name=facility.name if facility else "시설",
+                resident_name=resident.name,
+                inviter_name=inviter.name if inviter else "직원",
+                message=req.message,
+            )
+        except Exception as e:
+            logger.warning(f"BizTalk notification failed: {e}")
 
     return InvitationResponse(
         id=invitation.id,
         facility_id=invitation.facility_id,
         resident_id=invitation.resident_id,
         phone=invitation.phone,
+        email=invitation.email,
         relationship_type=invitation.relationship_type,
         message=invitation.message,
         status=invitation.status,
@@ -126,6 +141,7 @@ async def get_facility_invitations(
             facility_id=inv.facility_id,
             resident_id=inv.resident_id,
             phone=inv.phone,
+            email=inv.email,
             relationship_type=inv.relationship_type,
             message=inv.message,
             status=inv.status,
@@ -144,12 +160,21 @@ async def get_my_invitations(
     current_user: dict = Depends(get_current_guardian),
     db: AsyncSession = Depends(get_db),
 ):
-    """내 핸드폰 번호로 온 초대 목록"""
-    # 현재 유저의 전화번호 조회
+    """내 전화번호 또는 이메일로 온 초대 목록"""
     user_stmt = select(User).filter(User.id == current_user["user_id"])
     user_result = await db.execute(user_stmt)
     user = user_result.scalar_one_or_none()
-    if not user or not user.phone:
+    if not user:
+        return []
+
+    # 전화번호 또는 이메일로 매칭
+    match_conditions = []
+    if user.phone:
+        match_conditions.append(Invitation.phone == user.phone)
+    if user.email:
+        match_conditions.append(Invitation.email == user.email)
+
+    if not match_conditions:
         return []
 
     stmt = (
@@ -157,7 +182,7 @@ async def get_my_invitations(
         .join(Resident, Invitation.resident_id == Resident.id)
         .join(Facility, Invitation.facility_id == Facility.id)
         .filter(
-            Invitation.phone == user.phone,
+            or_(*match_conditions),
             Invitation.status == "pending",
         )
         .order_by(desc(Invitation.created_at))
@@ -171,6 +196,7 @@ async def get_my_invitations(
             facility_id=inv.facility_id,
             resident_id=inv.resident_id,
             phone=inv.phone,
+            email=inv.email,
             relationship_type=inv.relationship_type,
             message=inv.message,
             status=inv.status,
@@ -198,11 +224,14 @@ async def accept_invitation(
     if not invitation:
         raise HTTPException(status_code=404, detail="초대를 찾을 수 없거나 이미 처리되었습니다.")
 
-    # 핸드폰 번호 일치 확인
+    # 전화번호 또는 이메일 일치 확인
     user_stmt = select(User).filter(User.id == current_user["user_id"])
     user_result = await db.execute(user_stmt)
     user = user_result.scalar_one_or_none()
-    if not user or user.phone != invitation.phone:
+
+    phone_match = user and user.phone and invitation.phone and user.phone == invitation.phone
+    email_match = user and user.email and invitation.email and user.email == invitation.email
+    if not phone_match and not email_match:
         raise HTTPException(status_code=403, detail="이 초대의 대상이 아닙니다.")
 
     # 이미 Guardian 연결이 있는지 확인
