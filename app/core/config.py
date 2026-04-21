@@ -2,6 +2,7 @@
 환경 변수 및 애플리케이션 설정
 """
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -18,7 +19,9 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # JWT
-    JWT_SECRET: str = "your-secret-key-change-in-production"
+    # 기본값 없음 — .env 또는 환경변수로 반드시 주입 (32+ bytes 권장)
+    # 생성: python -c "import secrets; print(secrets.token_urlsafe(48))"
+    JWT_SECRET: str = Field(...)
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7일
     JWT_REFRESH_THRESHOLD_MINUTES: int = 60 * 24  # 남은 시간이 1일 미만이면 갱신
