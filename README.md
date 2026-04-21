@@ -198,6 +198,16 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - **OpenSearch 없음**: 얼굴 벡터 검색 비활성화
 - **InsightFace 없음**: 얼굴 인식 비활성화
 
+## CI/CD
+
+`main` 브랜치에 push되면 GitHub Actions가 자동으로 실행됩니다:
+
+1. **Build & Push**: Docker 이미지 빌드 후 `ghcr.io/senior-album/album-backend`에 push (태그: commit SHA 7자리 + `latest`)
+2. **Update Manifest**: `senior-album/album-deploy` 레포의 `k8s/backend.yaml` 이미지 태그를 새 SHA로 업데이트
+3. **Auto Deploy**: ArgoCD가 GitHub Webhook을 받아 즉시 동기화 → 맥미니 k3d 클러스터에 롤아웃
+
+수동 롤아웃이나 polling 대기 없이 push → 배포가 자동으로 이어집니다.
+
 ## 라이선스
 
 MIT License
