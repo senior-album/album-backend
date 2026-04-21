@@ -10,12 +10,13 @@ from io import BytesIO
 import numpy as np
 from PIL import Image as PILImage
 
-from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Query, Request
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.redis import check_rate_limit
 from app.core.security import get_current_user, get_current_guardian, get_current_staff, verify_facility_access
 from app.core.storage import get_storage
 from app.models.models import Photo, PhotoFace, PhotoResident, PhotoLike, PhotoShare, PhotoProcessingJob, PhotoAuditLog, Resident, Guardian, User
@@ -31,6 +32,17 @@ from app.services.opensearch_service import OpenSearchService
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/photos", tags=["photos"])
+
+
+async def _enforce_rate_limit(key: str, max_per_minute: int) -> None:
+    """Redis 기반 rate limit 체크. 초과 시 429 + Retry-After."""
+    blocked, retry_after = await check_rate_limit(key, max_per_minute, 60)
+    if blocked:
+        raise HTTPException(
+            status_code=429,
+            detail=f"요청이 너무 많습니다. {retry_after}초 후 다시 시도해주세요.",
+            headers={"Retry-After": str(retry_after or 60)},
+        )
 
 
 async def _enrich_photos_with_residents(
@@ -126,6 +138,9 @@ async def upload_photos(
     2. DB에 사진 레코드 + 처리 작업(job) 생성
     3. 실제 얼굴 감지/분류는 백그라운드 워커가 처리
     """
+    # Rate limit: 사용자당 100회/분 (멀티 업로드 버스트 허용)
+    await _enforce_rate_limit(f"upload:{current_user['user_id']}", 100)
+
     # facility_id가 코드(FAC-XXXX)로 들어온 경우 UUID로 변환
     from app.models.models import Facility as FacilityModel
     if len(facility_id) != 36 or '-' not in facility_id:
@@ -775,6 +790,9 @@ async def toggle_like(
     db: AsyncSession = Depends(get_db),
 ):
     """사진 좋아요 토글 (좋아요 ↔ 취소)"""
+    # Rate limit: 사용자당 60회/분 (스팸 좋아요 방지)
+    await _enforce_rate_limit(f"like:{current_user['user_id']}", 60)
+
     # 사진 존재 확인
     photo = await db.execute(select(Photo).filter(Photo.id == photo_id))
     if not photo.scalar_one_or_none():
@@ -848,6 +866,9 @@ async def create_share_link(
     db: AsyncSession = Depends(get_db),
 ):
     """사진 공유 링크 생성 (만료 시간 포함)"""
+    # Rate limit: 사용자당 10회/분 (공유 링크 남발 방지)
+    await _enforce_rate_limit(f"share:{current_user['user_id']}", 10)
+
     from datetime import datetime as dt, timedelta
 
     photo = await db.execute(select(Photo).filter(Photo.id == photo_id))
@@ -889,9 +910,14 @@ async def create_share_link(
 @router.get("/shared/{share_token}")
 async def get_shared_photo(
     share_token: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """공유 링크로 사진 조회 (인증 불필요, 만료 체크)"""
+    # Rate limit: IP당 30회/분 (익명 엔드포인트 — 무작위 토큰 대입 방지)
+    client_ip = request.client.host if request.client else "unknown"
+    await _enforce_rate_limit(f"share-view:{client_ip}", 30)
+
     from datetime import datetime as dt
 
     share_result = await db.execute(
