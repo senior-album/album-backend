@@ -4,10 +4,11 @@
 """
 
 import uuid
+import secrets
 import logging
 import httpx
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from jose import jwt as jose_jwt, JWTError
 from sqlalchemy import select, or_
@@ -93,38 +94,63 @@ async def verify_kakao_id_token(id_token: str) -> dict:
         raise HTTPException(status_code=400, detail="ID 토큰 검증에 실패했습니다.")
 
 
+OAUTH_STATE_COOKIE = "kakao_oauth_state"
+OAUTH_STATE_MAX_AGE = 600  # 10분
+
+
 @router.get("/login-url")
 async def get_kakao_login_url():
-    """프론트에서 사용할 카카오 로그인 URL 반환"""
+    """프론트에서 사용할 카카오 로그인 URL 반환 (CSRF 방지용 state 포함)"""
     settings = get_settings()
 
     if not settings.KAKAO_CLIENT_ID:
         raise HTTPException(status_code=503, detail="카카오 로그인이 설정되지 않았습니다.")
 
+    state = secrets.token_urlsafe(32)
     url = (
         f"{KAKAO_AUTH_URL}/oauth/authorize"
         f"?client_id={settings.KAKAO_CLIENT_ID}"
         f"&redirect_uri={settings.KAKAO_REDIRECT_URI}"
         f"&response_type=code"
         f"&scope={settings.KAKAO_SCOPES}"
+        f"&state={state}"
     )
-    return {"login_url": url}
+    resp = JSONResponse({"login_url": url})
+    resp.set_cookie(
+        OAUTH_STATE_COOKIE,
+        state,
+        max_age=OAUTH_STATE_MAX_AGE,
+        httponly=True,
+        secure=not settings.DEBUG,
+        samesite="lax",
+        path="/",
+    )
+    return resp
 
 
 @router.post("/callback")
 async def kakao_callback(
+    request: Request,
     code: str,
+    state: str = Query(..., description="login-url에서 발급받은 CSRF state"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     카카오 인증 코드 → 토큰 교환 → 사용자 정보 조회 → JWT 발급
 
-    프론트가 카카오 redirect에서 code를 받아 이 API로 전송
+    프론트가 카카오 redirect에서 code/state를 받아 이 API로 전송.
+    쿠키에 저장된 state와 쿼리 state를 비교해 CSRF 차단.
     """
     settings = get_settings()
 
     if not settings.KAKAO_CLIENT_ID:
         raise HTTPException(status_code=503, detail="카카오 로그인이 설정되지 않았습니다.")
+
+    # 0) CSRF state 검증 (쿼리 state ↔ 쿠키 state)
+    cookie_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not cookie_state or not secrets.compare_digest(cookie_state, state):
+        logger.warning(f"Kakao OAuth state mismatch: cookie={bool(cookie_state)}, match={cookie_state == state if cookie_state else False}")
+        raise HTTPException(status_code=400, detail="유효하지 않은 state — CSRF 공격으로 의심됩니다.")
 
     # 1) 인증 코드 → 액세스 토큰 교환
     token_data = {
@@ -284,6 +310,7 @@ async def kakao_callback(
         "facility": facility_data,
     })
     set_auth_cookie(response, access_token)
+    response.delete_cookie(OAUTH_STATE_COOKIE, path="/")
     return response
 
 
