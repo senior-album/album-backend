@@ -9,12 +9,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import User
 from app.schemas.schemas import PhoneOtpSendRequest, PhoneOtpVerifyRequest
 from app.services.phone_otp import (
     OtpVerifyError,
+    _load_code,
     check_send_rate_limits,
     normalize_phone,
     send_otp,
@@ -83,3 +85,24 @@ async def verify_phone_otp(
     await db.commit()
 
     return {"message": "인증되었습니다.", "verified_at": user.phone_verified_at.isoformat()}
+
+
+@router.get("/peek")
+async def peek_phone_otp(phone: str, current_user: dict = Depends(get_current_user)):
+    """
+    [DEBUG 전용] 발송된 OTP 를 그대로 반환.
+    DEBUG=True 이고 SMS_PROVIDER=log 일 때만 동작 — 운영 환경(DEBUG=False)에서는 404.
+
+    개발 중 실제 SMS 없이 테스트하려고 둠. 로그에서 코드 찾는 것보다 편리.
+    """
+    settings = get_settings()
+    if not settings.DEBUG or settings.SMS_PROVIDER != "log":
+        raise HTTPException(status_code=404, detail="Not found")
+
+    normalized = _validate_phone(phone)
+    payload = await _load_code(normalized)
+    if not payload:
+        raise HTTPException(status_code=404, detail="저장된 OTP 가 없습니다. 먼저 /send 를 호출하세요.")
+
+    logger.warning(f"[DEBUG] OTP peek by user={current_user['user_id']} phone={normalized[:3]}****{normalized[-4:]}")
+    return {"phone": normalized, "code": payload["code"], "attempts": payload["attempts"]}
