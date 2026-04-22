@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import get_settings
 from app.core.database import Database
 from app.core.redis import get_redis, close_redis
-from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth
+from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp
 
 # 로깅 설정
 logging.basicConfig(
@@ -173,6 +173,7 @@ app.include_router(photos.router)
 app.include_router(guardians.router)
 app.include_router(invitations.router)
 app.include_router(kakao_auth.router)
+app.include_router(phone_otp.router)
 
 
 # 로컬 업로드 디렉토리 정적 파일 서빙

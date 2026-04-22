@@ -45,6 +45,17 @@ class RegisterGuardianRequest(BaseModel):
     phone: Optional[str] = None
 
 
+class PhoneOtpSendRequest(BaseModel):
+    """전화번호 OTP 발송 요청"""
+    phone: str
+
+
+class PhoneOtpVerifyRequest(BaseModel):
+    """전화번호 OTP 검증 요청"""
+    phone: str
+    code: str
+
+
 # ==================== 사용자 관련 스키마 ====================
 
 class UserResponse(BaseModel):

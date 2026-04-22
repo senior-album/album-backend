@@ -70,6 +70,20 @@ class Settings(BaseSettings):
     LOGIN_MAX_ATTEMPTS: int = 5
     LOGIN_LOCKOUT_MINUTES: int = 15
 
+    # 전화번호 OTP
+    OTP_TTL_SECONDS: int = 300  # 5분 유효
+    OTP_FRESH_WINDOW_SECONDS: int = 600  # 시설 연결 요청 게이트 — 인증 후 10분 이내
+    OTP_MAX_VERIFY_ATTEMPTS: int = 5  # 한 코드당 검증 시도 횟수
+    OTP_SEND_RATE_PER_PHONE_PER_HOUR: int = 5
+    OTP_SEND_RATE_PER_PHONE_PER_MINUTE: int = 1
+    OTP_SEND_RATE_PER_IP_PER_HOUR: int = 20
+
+    # SMS 프로바이더 (log | coolsms)
+    SMS_PROVIDER: str = "log"
+    COOLSMS_API_KEY: str = ""
+    COOLSMS_API_SECRET: str = ""
+    COOLSMS_FROM_NUMBER: str = ""
+
     # CORS
     ALLOWED_ORIGINS: list = [
         "http://localhost:3000",
