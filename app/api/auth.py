@@ -31,8 +31,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# 비밀번호 해싱
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# 비밀번호 해싱 — bcrypt rounds=12 명시 (T-054)
+# deprecated="auto" + bcrypt__rounds=12 조합으로 rounds<12 해시는 needs_update()에서 True
+# → 로그인 성공 시점에 점진 재해싱 (아래 /login 엔드포인트 참조)
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=12,
+)
 
 # 인메모리 fallback (Redis 연결 실패 시)
 _login_attempts: dict[str, list[float]] = defaultdict(list)
@@ -130,6 +136,17 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
     # 성공 시 시도 기록 초기화 (Redis + 인메모리 둘 다)
     await clear_rate_limit(rate_key)
     _clear_login_attempts_inmemory(rate_key)
+
+    # 점진 재해싱 — 저장된 해시가 현재 rounds(12)보다 낮으면 갱신 (T-054)
+    # 실패해도 로그인은 성공 처리 (opportunistic upgrade)
+    if pwd_context.needs_update(user.password_hash):
+        try:
+            user.password_hash = hash_password(request.password)
+            await db.commit()
+            logger.info(f"password rehashed (rounds upgrade) for user {user.id}")
+        except Exception as e:
+            logger.warning(f"password rehash failed for user {user.id}: {e}")
+            await db.rollback()
 
     # 시설 정보 조회
     facility_data = None
