@@ -965,7 +965,7 @@ async def get_shared_photo(
     if not share:
         raise HTTPException(status_code=404, detail="공유 링크를 찾을 수 없습니다.")
 
-    # 만료 체크
+    # 만료 체크 (UTC naive datetime 기준 — PhotoShare.expires_at도 naive UTC로 저장)
     if share.expires_at and dt.utcnow() > share.expires_at:
         raise HTTPException(status_code=410, detail="공유 링크가 만료되었습니다.")
 
@@ -975,6 +975,19 @@ async def get_shared_photo(
     photo = photo_result.scalar_one_or_none()
     if not photo:
         raise HTTPException(status_code=404, detail="Photo not found")
+
+    # 공유 링크 접근 감사 로그 (누가 언제 어디서 공유 사진을 봤는지)
+    try:
+        db.add(PhotoAuditLog(
+            photo_id=photo.id,
+            action="share_view",
+            performed_by=share.user_id,  # 공유를 만든 사용자 (뷰어는 익명)
+            detail=f"token={share.share_token[:8]}..., ip={client_ip}",
+        ))
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"share_view audit log failed: {e}")
+        await db.rollback()
 
     # 좋아요 수
     like_count_result = await db.execute(
