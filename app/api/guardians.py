@@ -14,7 +14,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import get_current_user, get_current_guardian, get_current_staff
 from app.models.models import Guardian, Photo, PhotoResident, Resident, User, Facility
-from app.services.phone_otp import normalize_phone
+from app.services.profile import apply_profile_update
 from app.schemas.schemas import (
     PhotoResponse,
     ResidentResponse,
@@ -462,13 +462,7 @@ async def update_my_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if name is not None:
-        user.name = name
-    if phone is not None:
-        # 전화번호가 실제로 바뀌면 이전 OTP 인증을 무효화 — 시설 연결 요청 게이트 우회 방지
-        if normalize_phone(user.phone or "") != normalize_phone(phone):
-            user.phone_verified_at = None
-        user.phone = phone
+    apply_profile_update(user, name=name, phone=phone)
 
     await db.commit()
     await db.refresh(user)
