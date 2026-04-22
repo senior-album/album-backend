@@ -5,12 +5,15 @@ CRUD 및 얼굴 등록 (OpenSearch 임베딩 저장)
 
 import uuid
 import os
+import csv
+import io
 import logging
 from io import BytesIO
 import numpy as np
 from PIL import Image as PILImage
 
 from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,6 +82,183 @@ async def create_resident(
     await db.commit()
     await db.refresh(new_resident)
     return ResidentResponse.model_validate(new_resident)
+
+
+CSV_IMPORT_MAX_ROWS = 100
+CSV_TEMPLATE_HEADERS = ["name", "birth_date", "gender", "room_number", "medical_notes"]
+_VALID_GENDERS = {"M", "F", "남", "여", "남성", "여성"}
+
+
+def _normalize_gender(raw: str | None) -> str | None:
+    """성별 표기 정규화 — 'M'/'F'로 통일. 값이 없으면 None."""
+    if not raw:
+        return None
+    s = raw.strip().upper()
+    if s in {"M", "남", "남성"}:
+        return "M"
+    if s in {"F", "여", "여성"}:
+        return "F"
+    return None
+
+
+def _normalize_birth_date(raw: str | None) -> str | None:
+    """생년월일 정규화 — 'YYYY-MM-DD' 또는 'YYYY' 허용. 잘못된 형식은 ValueError."""
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    # 주민번호 뒷자리 포함 방지 — '-'로 시작하는 2번째 그룹이 7자리면 거부
+    if "-" in s:
+        parts = s.split("-")
+        if len(parts) == 2 and len(parts[1]) >= 7:
+            raise ValueError("주민등록번호 형식은 허용되지 않습니다. 생년월일만 입력하세요.")
+    # YYYY 단독
+    if len(s) == 4 and s.isdigit():
+        return s
+    # YYYY-MM-DD
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        try:
+            from datetime import date
+            y, m, d = int(s[:4]), int(s[5:7]), int(s[8:10])
+            date(y, m, d)
+            return s
+        except Exception:
+            raise ValueError(f"올바른 날짜 형식이 아닙니다: {s}")
+    # YYYYMMDD
+    if len(s) == 8 and s.isdigit():
+        try:
+            from datetime import date
+            y, m, d = int(s[:4]), int(s[4:6]), int(s[6:8])
+            date(y, m, d)
+            return f"{y:04d}-{m:02d}-{d:02d}"
+        except Exception:
+            raise ValueError(f"올바른 날짜 형식이 아닙니다: {s}")
+    raise ValueError(f"지원하지 않는 생년월일 형식: {s} (허용: YYYY-MM-DD, YYYYMMDD, YYYY)")
+
+
+@router.get("/import/template")
+async def download_csv_template(
+    current_user: dict = Depends(get_current_staff),
+):
+    """입소자 일괄 import용 CSV 템플릿 다운로드 (주민번호 뒷자리 제외, UTF-8 BOM for Excel)."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(CSV_TEMPLATE_HEADERS)
+    writer.writerow(["홍길동", "1940-03-15", "M", "101호", "고혈압"])
+    writer.writerow(["김순자", "1945", "F", "102호", ""])
+    writer.writerow(["박철수", "", "M", "", "당뇨"])
+    # Excel 호환을 위해 UTF-8 BOM 삽입
+    payload = "﻿" + buf.getvalue()
+    return StreamingResponse(
+        iter([payload.encode("utf-8")]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="residents_template.csv"'},
+    )
+
+
+@router.post("/import")
+async def import_residents_csv(
+    facility_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_staff),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    입소자 CSV 일괄 등록 (최대 100명/요청).
+    헤더: name, birth_date, gender, room_number, medical_notes
+    - name: 필수
+    - birth_date: YYYY-MM-DD / YYYYMMDD / YYYY (선택)
+    - gender: M, F, 남, 여 (선택)
+    - 주민등록번호 뒷자리는 저장하지 않습니다 — 뒷자리 포함 시 해당 행은 거부됩니다.
+    """
+    verify_facility_access(current_user, facility_id)
+
+    # 파일 크기 제한 (1MB — 100명 넉넉히 수용)
+    raw = await file.read()
+    if len(raw) > 1 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="CSV 파일은 1MB 이하만 허용됩니다.")
+
+    # BOM 및 인코딩 처리
+    text: str
+    for enc in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise HTTPException(status_code=400, detail="CSV 인코딩을 해석할 수 없습니다. UTF-8 또는 CP949로 저장해주세요.")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV 헤더가 없습니다.")
+
+    normalized_headers = [h.strip().lower() for h in reader.fieldnames]
+    if "name" not in normalized_headers:
+        raise HTTPException(status_code=400, detail="헤더에 'name' 컬럼이 반드시 있어야 합니다.")
+
+    created: list[dict] = []
+    errors: list[dict] = []
+    rows_seen = 0
+
+    for idx, row in enumerate(reader, start=2):  # row 1은 헤더
+        rows_seen += 1
+        if rows_seen > CSV_IMPORT_MAX_ROWS:
+            errors.append({"row": idx, "reason": f"최대 {CSV_IMPORT_MAX_ROWS}명까지만 등록 가능합니다. 초과분 무시."})
+            break
+
+        cleaned = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
+        name = cleaned.get("name", "")
+        if not name:
+            errors.append({"row": idx, "reason": "name 누락"})
+            continue
+
+        try:
+            birth_date = _normalize_birth_date(cleaned.get("birth_date"))
+        except ValueError as e:
+            errors.append({"row": idx, "name": name, "reason": str(e)})
+            continue
+
+        gender_raw = cleaned.get("gender")
+        if gender_raw and gender_raw not in _VALID_GENDERS:
+            # 정규화 시도
+            pass
+        gender = _normalize_gender(gender_raw)
+        if gender_raw and gender is None:
+            errors.append({"row": idx, "name": name, "reason": f"성별 값이 유효하지 않음: {gender_raw}"})
+            continue
+
+        new_resident = Resident(
+            id=str(uuid.uuid4()),
+            facility_id=facility_id,
+            code=generate_resident_code(),
+            name=name,
+            birth_date=birth_date,
+            gender=gender,
+            room_number=cleaned.get("room_number") or None,
+            medical_notes=cleaned.get("medical_notes") or None,
+        )
+        db.add(new_resident)
+        created.append({"row": idx, "name": name, "id": new_resident.id, "code": new_resident.code})
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"CSV import commit failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"DB 저장 실패: {e}")
+
+    logger.info(
+        f"[csv-import] facility={facility_id} created={len(created)} errors={len(errors)} by={current_user['user_id']}"
+    )
+    return {
+        "message": f"{len(created)}명 등록 완료 · {len(errors)}건 오류",
+        "created_count": len(created),
+        "error_count": len(errors),
+        "created": created,
+        "errors": errors,
+    }
 
 
 @router.get("/{resident_id}", response_model=ResidentDetailResponse)
