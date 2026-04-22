@@ -48,6 +48,7 @@ class User(Base):
     facility = relationship("Facility", back_populates="staff", foreign_keys=[facility_id])
 
     phone = Column(String(20), nullable=True)
+    phone_verified_at = Column(DateTime, nullable=True)  # 최근 OTP 성공 시각 — 시설 연결 요청 게이트용
     push_token = Column(String(500), nullable=True)
     notification_enabled = Column(Boolean, default=True)
     notification_settings = Column(JSON, default={})
