@@ -18,13 +18,14 @@ class Settings(BaseSettings):
     # Redis (로컬)
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # JWT
-    # 기본값 없음 — .env 또는 환경변수로 반드시 주입 (32+ bytes 권장)
+    # JWT (T-009 refresh token 도입)
+    # JWT_SECRET / JWT_REFRESH_SECRET 둘 다 .env 또는 K8s Secret으로 주입 필수
     # 생성: python -c "import secrets; print(secrets.token_urlsafe(48))"
     JWT_SECRET: str = Field(...)
+    JWT_REFRESH_SECRET: str = Field(...)  # access와 분리 (탈취 시 영향 격리)
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7일
-    JWT_REFRESH_THRESHOLD_MINUTES: int = 60 * 24  # 남은 시간이 1일 미만이면 갱신
+    JWT_EXPIRE_MINUTES: int = 60  # access: 60분 (T-009 이전엔 7일)
+    JWT_REFRESH_EXPIRE_MINUTES: int = 60 * 24 * 14  # refresh: 14일 (B1 rotation)
 
     # MinIO / S3 (로컬 or 나중에 AWS)
     MINIO_ENDPOINT: str = "localhost:9000"

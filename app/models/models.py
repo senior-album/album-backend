@@ -271,3 +271,24 @@ class Notification(Base):
     read_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RefreshToken(Base):
+    """
+    Refresh 토큰 — DB 저장 + rotation + reuse detection (T-009)
+    family_id: 같은 로그인에서 출발한 토큰 체인 식별자.
+               rotation 시 유지되며, reuse 감지되면 family 전체 일괄 revoke.
+    """
+    __tablename__ = "refresh_tokens"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    jti = Column(String(64), unique=True, nullable=False, index=True)
+    family_id = Column(String(36), nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    revoked_at = Column(DateTime, nullable=True)  # null이면 활성, NOT NULL이면 회수
+    revoke_reason = Column(String(50), nullable=True)  # "rotated", "logout", "logout-all", "reuse-detected"
+    user_agent = Column(String(500), nullable=True)
+    ip_address = Column(String(45), nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
