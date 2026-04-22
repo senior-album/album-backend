@@ -120,12 +120,22 @@ app = FastAPI(
 )
 
 # CORS 미들웨어 설정
+# allow_credentials=True와 allow_origins=["*"]는 동시 사용 불가 (RFC 준수)
+# method/header 화이트리스트: I-05 위협 차단
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+    ],
+    expose_headers=["Content-Disposition"],
+    max_age=600,
 )
 
 
