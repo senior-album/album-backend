@@ -4,9 +4,10 @@ Firebase 토큰 검증, JWT 생성/검증, 역할 기반 접근 제어
 """
 
 from datetime import datetime, timedelta
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple
 from functools import wraps
 import logging
+import secrets
 
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status, Request
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 # 쿠키 설정 상수
 COOKIE_NAME = "access_token"
-COOKIE_MAX_AGE = 60 * 60 * 24 * 7  # 7일 (초 단위)
+REFRESH_COOKIE_NAME = "refresh_token"
+REFRESH_COOKIE_PATH = "/auth"  # /auth/refresh, /auth/logout 에만 전달 (공격면 축소)
 
 # Firebase 인증 (현재 미사용 - 나중에 필요시 활성화)
 FIREBASE_AVAILABLE = False
@@ -52,7 +54,7 @@ class SecurityService:
 
     @staticmethod
     def verify_token(token: str) -> dict:
-        """JWT 토큰 검증 및 payload 반환"""
+        """JWT access 토큰 검증 및 payload 반환"""
         settings = get_settings()
 
         try:
@@ -69,6 +71,48 @@ class SecurityService:
                 detail="Invalid token",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+    @staticmethod
+    def create_refresh_token(user_id: str, jti: str) -> Tuple[str, datetime]:
+        """
+        Refresh 토큰 생성. jti는 호출자가 미리 생성해서 DB에 저장한 후 전달.
+        Returns (jwt_token, expires_at).
+        """
+        settings = get_settings()
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.JWT_REFRESH_EXPIRE_MINUTES)
+        payload = {
+            "sub": user_id,
+            "jti": jti,
+            "type": "refresh",
+            "exp": expires_at,
+        }
+        token = jwt.encode(payload, settings.JWT_REFRESH_SECRET, algorithm=settings.JWT_ALGORITHM)
+        return token, expires_at
+
+    @staticmethod
+    def verify_refresh_token(token: str) -> dict:
+        """Refresh 토큰 서명·만료 검증 (DB 조회는 호출자가 별도 수행)"""
+        settings = get_settings()
+        try:
+            payload = jwt.decode(
+                token,
+                settings.JWT_REFRESH_SECRET,
+                algorithms=[settings.JWT_ALGORITHM],
+            )
+            if payload.get("type") != "refresh":
+                raise JWTError("not a refresh token")
+            return payload
+        except JWTError as e:
+            logger.warning(f"Refresh token verification failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
+
+    @staticmethod
+    def generate_jti() -> str:
+        """Refresh 토큰 jti — URL-safe 32바이트 랜덤"""
+        return secrets.token_urlsafe(32)
 
     @staticmethod
     def verify_firebase_token(token: str) -> dict:
@@ -89,14 +133,14 @@ class SecurityService:
 
 
 def set_auth_cookie(response: JSONResponse, token: str) -> JSONResponse:
-    """응답에 httpOnly 쿠키로 JWT 설정"""
+    """응답에 httpOnly 쿠키로 access JWT 설정"""
     settings = get_settings()
     is_production = not settings.DEBUG
 
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
-        max_age=COOKIE_MAX_AGE,
+        max_age=settings.JWT_EXPIRE_MINUTES * 60,
         httponly=True,
         secure=is_production,          # 프로덕션에서만 Secure (HTTPS)
         samesite="lax",                # CSRF 방지
@@ -106,7 +150,7 @@ def set_auth_cookie(response: JSONResponse, token: str) -> JSONResponse:
 
 
 def clear_auth_cookie(response: JSONResponse) -> JSONResponse:
-    """응답에서 인증 쿠키 삭제"""
+    """응답에서 access 쿠키 삭제"""
     settings = get_settings()
     is_production = not settings.DEBUG
 
@@ -116,6 +160,38 @@ def clear_auth_cookie(response: JSONResponse) -> JSONResponse:
         secure=is_production,
         samesite="lax",
         path="/",
+    )
+    return response
+
+
+def set_refresh_cookie(response: JSONResponse, token: str) -> JSONResponse:
+    """응답에 httpOnly 쿠키로 refresh 토큰 설정 (path=/auth로 전달 범위 제한)"""
+    settings = get_settings()
+    is_production = not settings.DEBUG
+
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        max_age=settings.JWT_REFRESH_EXPIRE_MINUTES * 60,
+        httponly=True,
+        secure=is_production,
+        samesite="lax",
+        path=REFRESH_COOKIE_PATH,
+    )
+    return response
+
+
+def clear_refresh_cookie(response: JSONResponse) -> JSONResponse:
+    """응답에서 refresh 쿠키 삭제"""
+    settings = get_settings()
+    is_production = not settings.DEBUG
+
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
+        httponly=True,
+        secure=is_production,
+        samesite="lax",
+        path=REFRESH_COOKIE_PATH,
     )
     return response
 

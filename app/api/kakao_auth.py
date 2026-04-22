@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.security import SecurityService, get_current_user, set_auth_cookie
+from app.core.security import SecurityService, get_current_user, set_auth_cookie, set_refresh_cookie
+from app.api.auth import _issue_token_pair
 from app.models.models import User, Facility
 
 logger = logging.getLogger(__name__)
@@ -268,15 +269,10 @@ async def kakao_callback(
         await db.commit()
         await db.refresh(user)
 
-    # 4) JWT 발급
-    access_token = SecurityService.create_access_token(
-        data={
-            "sub": user.id,
-            "email": user.email,
-            "role": user.role,
-            "facility_id": user.facility_id,
-        }
-    )
+    # 4) JWT 쌍 발급 (T-009: access + refresh, 신규 family)
+    family_id = str(uuid.uuid4())
+    access_token, refresh_jwt = await _issue_token_pair(db, user, family_id, request)
+    await db.commit()
 
     # 시설 정보
     facility_data = None
@@ -310,12 +306,14 @@ async def kakao_callback(
         "facility": facility_data,
     })
     set_auth_cookie(response, access_token)
+    set_refresh_cookie(response, refresh_jwt)
     response.delete_cookie(OAUTH_STATE_COOKIE, path="/")
     return response
 
 
 @router.post("/set-role")
 async def set_role_after_kakao(
+    req: Request,
     role: str,
     facility_code: str = None,
     facility_name: str = None,
@@ -380,15 +378,10 @@ async def set_role_after_kakao(
     await db.commit()
     await db.refresh(user)
 
-    # 새 JWT (역할 반영)
-    access_token = SecurityService.create_access_token(
-        data={
-            "sub": user.id,
-            "email": user.email,
-            "role": user.role,
-            "facility_id": user.facility_id,
-        }
-    )
+    # 새 JWT 쌍 (역할 반영, T-009: 신규 family로 발급)
+    family_id = str(uuid.uuid4())
+    access_token, refresh_jwt = await _issue_token_pair(db, user, family_id, req)
+    await db.commit()
 
     # 시설 정보
     facility_data = None
@@ -421,6 +414,7 @@ async def set_role_after_kakao(
         "facility": facility_data,
     })
     set_auth_cookie(response, access_token)
+    set_refresh_cookie(response, refresh_jwt)
     return response
 
 
