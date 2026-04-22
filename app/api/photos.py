@@ -3,11 +3,13 @@
 업로드 시 얼굴 감지 → OpenSearch kNN 검색 → 자동 분류
 """
 
+import os
 import uuid
 import secrets
 import logging
 from io import BytesIO
 import numpy as np
+import magic
 from PIL import Image as PILImage
 
 from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Query, Request
@@ -43,6 +45,39 @@ async def _enforce_rate_limit(key: str, max_per_minute: int) -> None:
             detail=f"요청이 너무 많습니다. {retry_after}초 후 다시 시도해주세요.",
             headers={"Retry-After": str(retry_after or 60)},
         )
+
+# 업로드 검증 상수
+MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
+ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+
+
+def _validate_upload(filename: str, data: bytes) -> tuple[str, str]:
+    """크기/확장자/MIME(magic bytes)/Pillow 디코딩 4단계 검증."""
+    if len(data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"파일이 너무 큽니다 (최대 {MAX_UPLOAD_SIZE // 1024 // 1024}MB).",
+        )
+
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXT:
+        raise HTTPException(status_code=415, detail=f"허용되지 않는 확장자: {ext or '(없음)'}")
+
+    try:
+        sniffed = magic.from_buffer(data[:4096], mime=True)
+    except Exception as e:
+        logger.warning(f"magic sniff failed: {e}")
+        sniffed = None
+    if sniffed not in ALLOWED_MIME:
+        raise HTTPException(status_code=415, detail=f"허용되지 않는 파일 타입: {sniffed or '(unknown)'}")
+
+    try:
+        PILImage.open(BytesIO(data)).verify()
+    except Exception:
+        raise HTTPException(status_code=422, detail="손상되었거나 유효하지 않은 이미지입니다.")
+
+    return ext, sniffed
 
 
 async def _enrich_photos_with_residents(
@@ -162,8 +197,11 @@ async def upload_photos(
     for file in files:
         try:
             file_data = await file.read()
-            content_type = file.content_type or "image/jpeg"
-            filename = file.filename or "photo.jpg"
+
+            # 업로드 검증 (크기/확장자/MIME/디코딩)
+            ext, sniffed_mime = _validate_upload(file.filename or "", file_data)
+            content_type = sniffed_mime
+            filename = file.filename or f"photo{ext}"
 
             # 1) MinIO에 원본 업로드 → object key만 저장
             object_key = await storage.upload_file(
