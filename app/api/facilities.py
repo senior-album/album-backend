@@ -3,21 +3,25 @@
 시설 CRUD, 입소자 및 사진 조회, 대시보드 통계
 """
 
+import re
 import uuid
 import logging
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, status, Depends
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Query, Request, status, Depends
 from fastapi.responses import JSONResponse
-from sqlalchemy import select, func, desc, text
+from sqlalchemy import select, func, desc, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.redis import check_rate_limit
 from app.core.security import get_current_user, get_current_staff
 from app.models.models import Facility, User, Resident, Photo, PhotoResident, PhotoLike
 from app.schemas.schemas import (
     FacilityCreate,
     FacilityUpdate,
     FacilityResponse,
+    FacilitySearchResult,
     ResidentResponse,
     PhotoResponse,
     MatchedResidentInfo,
@@ -48,6 +52,70 @@ async def _resolve_facility_id(facility_id_or_code: str, db: AsyncSession) -> st
 
     # 찾지 못하면 원래 값 그대로 반환
     return facility_id_or_code
+
+
+def _mask_phone_tail(phone: Optional[str]) -> Optional[str]:
+    if not phone:
+        return None
+    digits = re.sub(r"\D", "", phone)
+    return digits[-4:] if len(digits) >= 4 else None
+
+
+@router.get("/search", response_model=list[FacilitySearchResult])
+async def search_facilities(
+    req: Request,
+    q: str = Query(..., min_length=2, max_length=100, description="시설명/주소/전화 부분일치 검색어"),
+    limit: int = Query(20, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    회원가입 전 시설 피커용 검색. 인증 불필요.
+    - name / address : ILIKE 부분일치
+    - phone : 숫자만 추출해 부분일치
+    - IP 기반 rate limit (열거 공격 방어)
+    """
+    client_ip = req.client.host if req.client else "unknown"
+    is_blocked, remaining = await check_rate_limit(
+        key=f"facility_search:{client_ip}",
+        max_attempts=60,
+        window_seconds=60,
+    )
+    if is_blocked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"검색 요청이 많습니다. {remaining}초 후 다시 시도해주세요.",
+        )
+
+    q_trim = q.strip()
+    like = f"%{q_trim}%"
+    digits = re.sub(r"\D", "", q_trim)
+
+    filters = [
+        Facility.name.ilike(like),
+        Facility.address.ilike(like),
+    ]
+    if digits:
+        filters.append(Facility.phone.like(f"%{digits}%"))
+
+    stmt = (
+        select(Facility)
+        .filter(or_(*filters))
+        .order_by(Facility.name)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    facilities = result.scalars().all()
+
+    return [
+        FacilitySearchResult(
+            id=f.id,
+            name=f.name,
+            address=f.address,
+            phone_last4=_mask_phone_tail(f.phone),
+            code=f.code,
+        )
+        for f in facilities
+    ]
 
 
 @router.get("/{facility_id}", response_model=FacilityResponse)

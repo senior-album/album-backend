@@ -85,6 +85,15 @@ class FacilityCreate(BaseModel):
     phone: Optional[str] = None
 
 
+class FacilitySearchResult(BaseModel):
+    """시설 검색 결과 — 회원가입 전 시설 피커용 (전화번호는 뒷자리만 노출)"""
+    id: str
+    name: str
+    address: str
+    phone_last4: Optional[str] = None
+    code: str
+
+
 class FacilityUpdate(BaseModel):
     """시설 수정"""
     name: Optional[str] = None
