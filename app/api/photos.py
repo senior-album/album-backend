@@ -933,14 +933,12 @@ async def create_share_link(
 
     share_url = f"{settings.FRONTEND_URL}/shared/{share_token}"
 
-    from app.core.storage import get_storage
-    storage = get_storage()
-
+    # 주의: presigned URL(1h)은 여기서 발급하지 않는다.
+    # 공유 수신자는 share_url → /shared/{token}에서 매번 새 presigned URL을 받는다.
+    # 발급자에게 1h URL을 돌려주면 클라이언트가 캐싱·노출할 위험 + 72h 공유와 정책 불일치.
     return {
         "share_token": share_token,
         "share_url": share_url,
-        "photo_url": storage.to_presigned(photo_obj.original_url),
-        "thumbnail_url": storage.to_presigned(photo_obj.thumbnail_url) if photo_obj.thumbnail_url else None,
         "expires_at": expires_at.isoformat(),
     }
 
