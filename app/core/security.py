@@ -12,6 +12,7 @@ import secrets
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -326,3 +327,67 @@ async def verify_facility_access(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="해당 시설에 접근 권한이 없습니다.",
         )
+
+
+async def verify_photo_access(
+    current_user: dict,
+    photo,
+    db: AsyncSession,
+):
+    """
+    사진 단건에 대한 접근 권한 검증 — 역할별 경로 분기.
+
+    - staff: verify_facility_access 위임 (자기 시설 사진만).
+    - guardian: 본인이 승인된 어르신의 공개 사진만. PhotoResident 다대다 + Photo.resident_id 레거시 모두 조회.
+    - 기타 role: 차단 (일반 user는 현재 직접 사진 접근 경로 없음).
+
+    존재 자체 노출을 피하려 권한 실패는 403, 미존재는 호출 측에서 404.
+    """
+    role = current_user.get("role")
+
+    if role == "staff":
+        await verify_facility_access(current_user, photo.facility_id, db)
+        return
+
+    if role == "guardian":
+        from app.models.models import Guardian, PhotoResident
+
+        if not photo.is_public:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="해당 사진에 접근 권한이 없습니다.",
+            )
+
+        stmt = select(Guardian.resident_id).filter(
+            Guardian.user_id == current_user["user_id"],
+            Guardian.is_approved == True,  # noqa: E712
+            Guardian.resident_id.isnot(None),
+        )
+        result = await db.execute(stmt)
+        resident_ids = [rid for (rid,) in result.all()]
+        if not resident_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="해당 사진에 접근 권한이 없습니다.",
+            )
+
+        if photo.resident_id in resident_ids:
+            return
+
+        pr_stmt = select(PhotoResident.id).filter(
+            PhotoResident.photo_id == photo.id,
+            PhotoResident.resident_id.in_(resident_ids),
+        ).limit(1)
+        pr_result = await db.execute(pr_stmt)
+        if pr_result.scalar_one_or_none() is not None:
+            return
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="해당 사진에 접근 권한이 없습니다.",
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="해당 사진에 접근 권한이 없습니다.",
+    )
