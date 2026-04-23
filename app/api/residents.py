@@ -376,24 +376,47 @@ async def register_face(
         )
 
         if matched:
-            # DB에서 Photo, PhotoFace, PhotoResident 레코드 업데이트
+            # 매치 전체의 face/photo id 를 한 번에 조회해 N+1 제거
+            face_ids = {m["face_id"] for m in matched if m.get("face_id")}
+            photo_ids = {m["photo_id"] for m in matched if m.get("photo_id")}
+
+            photo_faces: dict = {}
+            if face_ids:
+                face_result = await db.execute(
+                    select(PhotoFace).filter(PhotoFace.id.in_(face_ids))
+                )
+                photo_faces = {pf.id: pf for pf in face_result.scalars().all()}
+
+            photos: dict = {}
+            existing_pr_photo_ids: set = set()
+            if photo_ids:
+                photo_result = await db.execute(
+                    select(Photo).filter(Photo.id.in_(photo_ids))
+                )
+                photos = {p.id: p for p in photo_result.scalars().all()}
+
+                existing_pr_result = await db.execute(
+                    select(PhotoResident.photo_id).filter(
+                        PhotoResident.photo_id.in_(photo_ids),
+                        PhotoResident.resident_id == resident_id,
+                    )
+                )
+                existing_pr_photo_ids = set(existing_pr_result.scalars().all())
+
             for m in matched:
                 photo_id = m.get("photo_id")
                 face_id = m.get("face_id")
+                score = m["score"]
 
                 if face_id:
-                    face_stmt = select(PhotoFace).filter(PhotoFace.id == face_id)
-                    face_result = await db.execute(face_stmt)
-                    photo_face = face_result.scalar_one_or_none()
+                    photo_face = photo_faces.get(face_id)
                     if photo_face and not photo_face.resident_id:
                         photo_face.resident_id = resident_id
-                        photo_face.confidence = m["score"]
-                        photo_face.is_confirmed = m["score"] >= 0.8
+                        photo_face.confidence = score
+                        photo_face.is_confirmed = score >= 0.8
 
                 if photo_id:
-                    photo_stmt = select(Photo).filter(Photo.id == photo_id)
-                    photo_result = await db.execute(photo_stmt)
-                    photo = photo_result.scalar_one_or_none()
+                    photo = photos.get(photo_id)
                     if photo:
                         # 하위 호환: Photo.resident_id 설정
                         if not photo.resident_id:
@@ -401,21 +424,16 @@ async def register_face(
                         photo.processing_status = "classified"
                         reclassified_count += 1
 
-                        # PhotoResident 다대다 레코드 생성 (중복 방지)
-                        existing_pr = await db.execute(
-                            select(PhotoResident).filter(
-                                PhotoResident.photo_id == photo_id,
-                                PhotoResident.resident_id == resident_id,
-                            )
-                        )
-                        if not existing_pr.scalar_one_or_none():
+                        # PhotoResident 다대다 레코드 생성 (중복 방지, 배치 내 중복도 차단)
+                        if photo_id not in existing_pr_photo_ids:
                             pr = PhotoResident(
                                 id=str(uuid.uuid4()),
                                 photo_id=photo_id,
                                 resident_id=resident_id,
-                                confidence=m["score"],
+                                confidence=score,
                             )
                             db.add(pr)
+                            existing_pr_photo_ids.add(photo_id)
 
             await db.commit()
             logger.info(f"Auto-reclassified {reclassified_count} photos for resident {resident.name}")

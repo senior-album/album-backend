@@ -6,6 +6,7 @@ OpenSearch 서비스
 import logging
 from typing import Optional, List, Tuple
 from opensearchpy import OpenSearch
+from opensearchpy.helpers import bulk
 
 from app.core.config import get_settings
 
@@ -410,6 +411,7 @@ class OpenSearchService:
         ref_vec = ref_vec / ref_norm
 
         matched = []
+        actions = []
         for hit in unmatched:
             doc_id = hit["_id"]
             source = hit["_source"]
@@ -434,22 +436,30 @@ class OpenSearchService:
                     f"score={cosine_sim:.4f}"
                 )
 
-                # refresh=True 는 매 업데이트마다 인덱스 플러시라 N개 매치 시 응답 타임아웃 유발
-                try:
-                    client.update(
-                        index=FACE_INDEX,
-                        id=doc_id,
-                        body={"doc": {"resident_id": new_resident_id}},
-                    )
-                except Exception as e:
-                    logger.warning(f"Reclassify: failed to update doc {doc_id}: {e}")
-
+                actions.append({
+                    "_op_type": "update",
+                    "_index": FACE_INDEX,
+                    "_id": doc_id,
+                    "doc": {"resident_id": new_resident_id},
+                })
                 matched.append({
                     "photo_id": photo_id,
                     "face_id": face_id,
                     "doc_id": doc_id,
                     "score": cosine_sim,
                 })
+
+        if actions:
+            try:
+                success, errors = bulk(client, actions, raise_on_error=False)
+                if errors:
+                    logger.warning(
+                        f"Reclassify: bulk update had {len(errors)} errors out of {len(actions)}"
+                    )
+                else:
+                    logger.info(f"Reclassify: bulk updated {success} docs in one round-trip")
+            except Exception as e:
+                logger.error(f"Reclassify: bulk update failed: {e}")
 
         logger.info(f"Reclassify: {len(matched)} photos matched to resident {new_resident_id}")
         return matched
