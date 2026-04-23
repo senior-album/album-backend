@@ -92,6 +92,32 @@ async def _enforce_photo_queue_capacity(
             headers={"Retry-After": "120"},
         )
 
+
+def _audit_photo(
+    db: AsyncSession,
+    *,
+    photo_id: str,
+    action: str,
+    performed_by: str,
+    detail: str | None = None,
+) -> None:
+    """
+    T-101: PhotoAuditLog 기록 enqueue.
+
+    호출부에서 실제 커밋. 엔티티 생성 실패가 요청 본 경로를 깨지 않도록
+    try/except 로 감싼다 (감사는 best-effort). detail 은 추가 컨텍스트
+    (IP, 공유 토큰 prefix 등) 를 담지만, PII 는 포함하지 않는다.
+    """
+    try:
+        db.add(PhotoAuditLog(
+            photo_id=photo_id,
+            action=action,
+            performed_by=performed_by,
+            detail=detail,
+        ))
+    except Exception as e:
+        logger.warning(f"audit log enqueue failed ({action}, photo={photo_id}): {e}")
+
 # 업로드 검증 상수
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
@@ -381,14 +407,31 @@ async def get_processing_jobs_status(
 @router.get("/{photo_id}", response_model=PhotoDetailResponse)
 async def get_photo(
     photo_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """사진 상세 조회 (얼굴 감지 결과 포함)"""
+    """
+    사진 상세 조회 (얼굴 감지 결과 포함).
+
+    T-101: 인증 사용자가 조회할 때 PhotoAuditLog에 view 액션으로 기록.
+    """
     stmt = select(Photo).filter(Photo.id == photo_id)
     result = await db.execute(stmt)
     photo = result.scalar_one_or_none()
     if not photo:
         raise HTTPException(status_code=404, detail="Photo not found")
+
+    client_ip = request.client.host if request.client else "unknown"
+    _audit_photo(
+        db,
+        photo_id=photo.id,
+        action="view",
+        performed_by=current_user["user_id"],
+        detail=f"ip={client_ip}",
+    )
+    await db.commit()
+
     return PhotoDetailResponse.model_validate(photo)
 
 
@@ -982,6 +1025,14 @@ async def create_share_link(
         expires_at=expires_at,
     )
     db.add(share)
+    # T-101: 공유 링크 생성도 감사 대상.
+    _audit_photo(
+        db,
+        photo_id=photo_id,
+        action="share_create",
+        performed_by=current_user["user_id"],
+        detail=f"token={share_token[:8]}..., expires_at={expires_at.isoformat()}",
+    )
     await db.commit()
 
     share_url = f"{settings.FRONTEND_URL}/shared/{share_token}"
