@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import admin_audit
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import get_current_user, get_current_guardian, get_current_staff
@@ -156,6 +157,21 @@ async def approve_or_reject_guardian(
         guardian.approved_by = current_user["user_id"]
         guardian.reject_reason = request.reject_reason
         message = "보호자 요청이 거부되었습니다."
+
+    # T-102: 승인/거부 모두 관리자 특권 행위로 감사 기록.
+    admin_audit(
+        db,
+        action="guardian_approve" if request.approved else "guardian_reject",
+        performed_by=current_user["user_id"],
+        target_type="guardian",
+        target_id=guardian_id,
+        facility_id=guardian.facility_id,
+        detail=(
+            f"resident_id={guardian.resident_id}"
+            if request.approved
+            else f"reason={(request.reject_reason or '')[:120]}"
+        ),
+    )
 
     await db.commit()
 

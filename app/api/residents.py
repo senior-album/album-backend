@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import admin_audit
 from app.core.config import get_settings
 from app.core.database import Database, get_db
 from app.core.images import reencode_strip_metadata
@@ -291,16 +292,34 @@ async def update_resident(
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
 
+    changed_fields: list[str] = []
     if resident_update.name is not None:
         resident.name = resident_update.name
+        changed_fields.append("name")
     if resident_update.birth_date is not None:
         resident.birth_date = resident_update.birth_date
+        changed_fields.append("birth_date")
     if resident_update.gender is not None:
         resident.gender = resident_update.gender
+        changed_fields.append("gender")
     if resident_update.room_number is not None:
         resident.room_number = resident_update.room_number
+        changed_fields.append("room_number")
     if resident_update.medical_notes is not None:
         resident.medical_notes = resident_update.medical_notes
+        changed_fields.append("medical_notes")
+
+    # T-102: 입소자 정보 수정 — 이름/의료 메모 등 PII 변경. 실제 값 대신
+    # 변경된 필드명만 기록 (로그에 PII 재-저장 회피).
+    admin_audit(
+        db,
+        action="resident_update",
+        performed_by=current_user["user_id"],
+        target_type="resident",
+        target_id=resident.id,
+        facility_id=resident.facility_id,
+        detail=f"fields={','.join(changed_fields) or 'none'}",
+    )
 
     await db.commit()
     await db.refresh(resident)
@@ -543,15 +562,29 @@ async def delete_resident_face(
     resident_id: str,
     doc_id: str,
     current_user: dict = Depends(get_current_staff),
+    db: AsyncSession = Depends(get_db),
 ):
     """등록된 기준 사진 삭제"""
     try:
         OpenSearchService.delete_embedding(doc_id)
-        return {"message": "Face deleted successfully", "doc_id": doc_id}
     except Exception as e:
         logger.error(f"Failed to delete face: {e}", exc_info=True)
         # T-104: OpenSearch 예외 메시지(인덱스명/쿼리 등) 유출 방지
         raise HTTPException(status_code=500, detail="얼굴 삭제 중 서버 오류가 발생했습니다.")
+
+    # T-102: 기준 사진 삭제는 분류 결과 전체에 영향을 줄 수 있어 감사 대상.
+    admin_audit(
+        db,
+        action="resident_face_delete",
+        performed_by=current_user["user_id"],
+        target_type="resident",
+        target_id=resident_id,
+        facility_id=current_user.get("facility_id"),
+        detail=f"embedding_doc_id={doc_id}",
+    )
+    await db.commit()
+
+    return {"message": "Face deleted successfully", "doc_id": doc_id}
 
 
 @router.get("/{resident_id}/photos", response_model=list[PhotoResponse])
