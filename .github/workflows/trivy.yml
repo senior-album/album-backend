@@ -33,7 +33,7 @@ jobs:
       # 도입 초기 soft-fail — SARIF 는 계속 Security 탭에 업로드.
       # .trivyignore 로 수용 CVE 정리 후 step 의 continue-on-error 제거 + exit-code "1" 로 전환.
       - name: Run Trivy scanner
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
           image-ref: album-backend:scan
