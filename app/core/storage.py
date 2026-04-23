@@ -3,6 +3,7 @@ MinIO (S3-compatible) object storage service.
 Uses boto3 which is already a dependency.
 """
 
+import re
 import uuid
 import logging
 from io import BytesIO
@@ -12,6 +13,45 @@ from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
 from app.core.config import get_settings
+
+
+# T-100: object key 생성에 들어가는 prefix/ext 화이트리스트
+# facility_id 는 DB 가 보증한 UUID 지만, `{facility}/thumbnails` 같이 조합해서
+# 넘기는 호출부가 있어 storage 레이어에서 한 번 더 검증 — defense in depth.
+_SAFE_PREFIX_SEGMENT = re.compile(r"^[a-zA-Z0-9_-]+$")
+_SAFE_EXT = re.compile(r"^[a-zA-Z0-9]{1,8}$")
+
+
+def _sanitize_object_prefix(prefix: str) -> str:
+    """
+    object key prefix 를 정규화·검증한다.
+
+    허용: 알파뉴메릭 + `_` + `-` 로 구성된 세그먼트를 `/` 로 결합한 형태
+    (예: `fac_abc123`, `fac_abc123/thumbnails`, `fac_abc123/faces`).
+
+    차단: `..`, 절대경로(`/x`), 백슬래시, null 바이트, 빈 세그먼트, 제어문자.
+
+    Raises: ValueError — 호출부에서 400 으로 매핑하거나 내부 assertion 처럼 사용.
+    """
+    if not prefix or not isinstance(prefix, str):
+        raise ValueError("Invalid storage prefix: empty or non-string")
+    if "\0" in prefix or "\\" in prefix:
+        raise ValueError("Invalid characters in storage prefix")
+    segments = [s for s in prefix.split("/") if s]  # 연속/선후행 슬래시 제거
+    if not segments:
+        raise ValueError("Empty storage prefix after normalization")
+    for s in segments:
+        if s in (".", "..") or not _SAFE_PREFIX_SEGMENT.match(s):
+            raise ValueError(f"Unsafe path segment in storage prefix: {s!r}")
+    return "/".join(segments)
+
+
+def _sanitize_extension(ext: str) -> str:
+    """확장자 sanitize — 알파뉴메릭만, 길이 제한. 실패 시 기본 'jpg'."""
+    if not ext:
+        return "jpg"
+    ext = ext.lstrip(".").lower()
+    return ext if _SAFE_EXT.match(ext) else "jpg"
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +126,16 @@ class StorageService:
             logger.warning(f"Could not set bucket policy: {e}")
 
     async def upload_file(self, file_data: bytes, filename: str, content_type: str, facility_id: str) -> str:
-        """Upload a file and return the object key."""
-        ext = filename.rsplit(".", 1)[-1] if "." in filename else "jpg"
-        object_key = f"{facility_id}/{uuid.uuid4().hex}.{ext}"
+        """
+        Upload a file and return the object key.
+
+        T-100: `facility_id` 는 object key prefix 로 직접 들어가므로 path
+        traversal 방어를 위해 sanitize. 동일하게 filename 확장자도 제한.
+        """
+        raw_ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
+        safe_prefix = _sanitize_object_prefix(facility_id)
+        safe_ext = _sanitize_extension(raw_ext)
+        object_key = f"{safe_prefix}/{uuid.uuid4().hex}.{safe_ext}"
 
         self.client.put_object(
             Bucket=self.bucket,
