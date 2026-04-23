@@ -14,18 +14,11 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_settings
 from app.core.database import Database
-from app.core.logging_filters import PIIRedactionFilter
+from app.core.logging_config import configure_logging
 from app.core.redis import get_redis, close_redis
 from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp
 
-# 로깅 설정
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-# T-103: PII(이메일 / 휴대폰) redact — root logger 에 붙이면 propagate 되는
-# 모든 child logger 기록에 적용된다.
-logging.getLogger().addFilter(PIIRedactionFilter())
+configure_logging()
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
