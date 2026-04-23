@@ -12,13 +12,13 @@ from io import BytesIO
 import numpy as np
 from PIL import Image as PILImage
 
-from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.database import get_db
+from app.core.database import Database, get_db
 from app.core.security import get_current_user, get_current_staff, verify_facility_access
 from app.core.storage import get_storage
 from app.models.models import Resident, Photo, PhotoFace, PhotoResident
@@ -305,18 +305,127 @@ async def update_resident(
     return ResidentResponse.model_validate(resident)
 
 
-@router.post("/{resident_id}/register-face")
+async def _reclassify_after_register_face(
+    resident_id: str,
+    resident_name: str,
+    facility_id: str,
+    new_reference_embedding: list,
+) -> None:
+    """
+    백그라운드 실행: 새로 등록된 기준 사진으로 facility 내 미분류 얼굴 재분류.
+
+    register-face 요청 응답을 차단하지 않기 위해 BackgroundTasks 로 호출된다.
+    실패해도 기준 사진 등록 자체는 이미 커밋된 상태이므로 여기서 raise 하지 않고 로그만 남긴다.
+    """
+    settings = get_settings()
+    try:
+        matched = OpenSearchService.reclassify_unmatched(
+            facility_id=facility_id,
+            new_reference_embedding=new_reference_embedding,
+            new_resident_id=resident_id,
+            threshold=settings.FACE_SIMILARITY_THRESHOLD,
+        )
+    except Exception as e:
+        logger.error(
+            f"[reclassify-bg] resident={resident_id} OpenSearch reclassify failed: {e}",
+            exc_info=True,
+        )
+        return
+
+    if not matched:
+        logger.info(f"[reclassify-bg] resident={resident_id} no unmatched faces matched")
+        return
+
+    try:
+        async with Database.session_scope() as db:
+            # 매치 전체의 face/photo id 를 한 번에 조회해 N+1 제거
+            face_ids = {m["face_id"] for m in matched if m.get("face_id")}
+            photo_ids = {m["photo_id"] for m in matched if m.get("photo_id")}
+
+            photo_faces: dict = {}
+            if face_ids:
+                face_result = await db.execute(
+                    select(PhotoFace).filter(PhotoFace.id.in_(face_ids))
+                )
+                photo_faces = {pf.id: pf for pf in face_result.scalars().all()}
+
+            photos: dict = {}
+            existing_pr_photo_ids: set = set()
+            if photo_ids:
+                photo_result = await db.execute(
+                    select(Photo).filter(Photo.id.in_(photo_ids))
+                )
+                photos = {p.id: p for p in photo_result.scalars().all()}
+
+                existing_pr_result = await db.execute(
+                    select(PhotoResident.photo_id).filter(
+                        PhotoResident.photo_id.in_(photo_ids),
+                        PhotoResident.resident_id == resident_id,
+                    )
+                )
+                existing_pr_photo_ids = set(existing_pr_result.scalars().all())
+
+            reclassified_count = 0
+            for m in matched:
+                photo_id = m.get("photo_id")
+                face_id = m.get("face_id")
+                score = m["score"]
+
+                if face_id:
+                    photo_face = photo_faces.get(face_id)
+                    if photo_face and not photo_face.resident_id:
+                        photo_face.resident_id = resident_id
+                        photo_face.confidence = score
+                        photo_face.is_confirmed = score >= 0.8
+
+                if photo_id:
+                    photo = photos.get(photo_id)
+                    if photo:
+                        # 하위 호환: Photo.resident_id 설정
+                        if not photo.resident_id:
+                            photo.resident_id = resident_id
+                        photo.processing_status = "classified"
+                        reclassified_count += 1
+
+                        # PhotoResident 다대다 레코드 생성 (중복 방지, 배치 내 중복도 차단)
+                        if photo_id not in existing_pr_photo_ids:
+                            pr = PhotoResident(
+                                id=str(uuid.uuid4()),
+                                photo_id=photo_id,
+                                resident_id=resident_id,
+                                confidence=score,
+                            )
+                            db.add(pr)
+                            existing_pr_photo_ids.add(photo_id)
+
+            # session_scope 의 __aexit__ 에서 commit
+        logger.info(
+            f"[reclassify-bg] resident={resident_id} ({resident_name}) "
+            f"reclassified {reclassified_count} photos from {len(matched)} matches"
+        )
+    except Exception as e:
+        logger.error(
+            f"[reclassify-bg] resident={resident_id} DB update failed: {e}",
+            exc_info=True,
+        )
+
+
+@router.post("/{resident_id}/register-face", status_code=status.HTTP_202_ACCEPTED)
 async def register_face(
     resident_id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_staff),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    입소자 기준 사진(얼굴) 등록
+    입소자 기준 사진(얼굴) 등록.
+
     1. 사진에서 얼굴 임베딩 추출
-    2. OpenSearch에 reference embedding으로 저장
-    3. 이후 사진 업로드 시 이 임베딩과 비교하여 자동 분류
+    2. MinIO 저장 + OpenSearch reference embedding 등록 — 여기까지가 동기 처리
+    3. 기존 미분류 사진 재분류는 BackgroundTasks 로 비동기 처리 (202 반환 후 실행)
+
+    이후 사진 업로드 시 이 임베딩과 비교되어 자동 분류됨.
     """
     # 입소자 확인
     stmt = select(Resident).filter(Resident.id == resident_id)
@@ -364,82 +473,14 @@ async def register_face(
         is_reference=True,
     )
 
-    # 자동 재분류: 미분류 사진들을 새 기준 사진과 비교
-    settings = get_settings()
-    reclassified_count = 0
-    try:
-        matched = OpenSearchService.reclassify_unmatched(
-            facility_id=resident.facility_id,
-            new_reference_embedding=embedding,
-            new_resident_id=resident_id,
-            threshold=settings.FACE_SIMILARITY_THRESHOLD,
-        )
-
-        if matched:
-            # 매치 전체의 face/photo id 를 한 번에 조회해 N+1 제거
-            face_ids = {m["face_id"] for m in matched if m.get("face_id")}
-            photo_ids = {m["photo_id"] for m in matched if m.get("photo_id")}
-
-            photo_faces: dict = {}
-            if face_ids:
-                face_result = await db.execute(
-                    select(PhotoFace).filter(PhotoFace.id.in_(face_ids))
-                )
-                photo_faces = {pf.id: pf for pf in face_result.scalars().all()}
-
-            photos: dict = {}
-            existing_pr_photo_ids: set = set()
-            if photo_ids:
-                photo_result = await db.execute(
-                    select(Photo).filter(Photo.id.in_(photo_ids))
-                )
-                photos = {p.id: p for p in photo_result.scalars().all()}
-
-                existing_pr_result = await db.execute(
-                    select(PhotoResident.photo_id).filter(
-                        PhotoResident.photo_id.in_(photo_ids),
-                        PhotoResident.resident_id == resident_id,
-                    )
-                )
-                existing_pr_photo_ids = set(existing_pr_result.scalars().all())
-
-            for m in matched:
-                photo_id = m.get("photo_id")
-                face_id = m.get("face_id")
-                score = m["score"]
-
-                if face_id:
-                    photo_face = photo_faces.get(face_id)
-                    if photo_face and not photo_face.resident_id:
-                        photo_face.resident_id = resident_id
-                        photo_face.confidence = score
-                        photo_face.is_confirmed = score >= 0.8
-
-                if photo_id:
-                    photo = photos.get(photo_id)
-                    if photo:
-                        # 하위 호환: Photo.resident_id 설정
-                        if not photo.resident_id:
-                            photo.resident_id = resident_id
-                        photo.processing_status = "classified"
-                        reclassified_count += 1
-
-                        # PhotoResident 다대다 레코드 생성 (중복 방지, 배치 내 중복도 차단)
-                        if photo_id not in existing_pr_photo_ids:
-                            pr = PhotoResident(
-                                id=str(uuid.uuid4()),
-                                photo_id=photo_id,
-                                resident_id=resident_id,
-                                confidence=score,
-                            )
-                            db.add(pr)
-                            existing_pr_photo_ids.add(photo_id)
-
-            await db.commit()
-            logger.info(f"Auto-reclassified {reclassified_count} photos for resident {resident.name}")
-    except Exception as e:
-        logger.error(f"Auto-reclassification failed: {e}", exc_info=True)
-        # 재분류 실패해도 기준 사진 등록 자체는 성공
+    # 미분류 사진 재분류는 백그라운드에서 — 응답을 차단하지 않는다
+    background_tasks.add_task(
+        _reclassify_after_register_face,
+        resident_id=resident_id,
+        resident_name=resident.name,
+        facility_id=resident.facility_id,
+        new_reference_embedding=embedding,
+    )
 
     return {
         "message": "Face registered successfully",
@@ -447,7 +488,9 @@ async def register_face(
         "resident_name": resident.name,
         "embedding_id": doc_id,
         "photo_url": storage.to_presigned(object_key),
-        "reclassified_photos": reclassified_count,
+        # 재분류는 비동기 — 응답 시점엔 결과를 알 수 없음. 하위 호환을 위해 null 유지.
+        "reclassified_photos": None,
+        "reclassification_status": "scheduled",
     }
 
 
