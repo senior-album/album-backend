@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 # 얼굴 임베딩 인덱스 설정
 FACE_INDEX = "face_embeddings"
 
+# T-107: kNN/검색 리소스 상한
+# - MAX_KNN_K: search_similar 의 k 를 이 값으로 clamp (DoS 방지)
+# - RECLASSIFY_BATCH_SIZE / RECLASSIFY_MAX_TOTAL: reclassify_unmatched 의 페이지네이션 파라미터
+#   기존에는 size=200 단건 호출이라 미분류가 200건을 넘으면 이후는 누락됐음
+MAX_KNN_K = 100
+RECLASSIFY_BATCH_SIZE = 200
+RECLASSIFY_MAX_TOTAL = 5000
+
 
 class OpenSearchService:
     """OpenSearch 얼굴 임베딩 저장/검색 서비스"""
@@ -165,12 +173,21 @@ class OpenSearchService:
         유사한 얼굴 검색 (kNN)
         OpenSearch kNN query format: filter는 knn 절 내부에 배치
 
+        T-107: k 는 MAX_KNN_K 로 clamp — 호출자가 부주의하게 큰 값을 넘겨도
+        OpenSearch 리소스 소모 상한이 걸림.
+
         Returns:
             [(resident_id, score), ...] 유사도 높은 순
         """
         if embedding is None:
             logger.warning("search_similar called with None embedding")
             return []
+
+        if k < 1:
+            k = 1
+        elif k > MAX_KNN_K:
+            logger.warning(f"search_similar: requested k={k} capped to {MAX_KNN_K}")
+            k = MAX_KNN_K
 
         client = cls.get_client()
 
@@ -370,28 +387,52 @@ class OpenSearchService:
         """
         client = cls.get_client()
 
-        # 1) 미분류 얼굴 임베딩 가져오기 (is_reference=False, resident_id가 빈 문자열)
+        # 1) 미분류 얼굴 임베딩 페이지네이션으로 수집 (T-107)
+        # 기존에는 size=200 단건 호출이라 미분류가 200 건을 넘으면 나머지가 조용히 누락됨.
+        # 이제 RECLASSIFY_BATCH_SIZE 씩 반복 조회하여 RECLASSIFY_MAX_TOTAL 까지 수집.
+        unmatched: list = []
+        unmatched_query_body = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"facility_id": facility_id}},
+                        {"term": {"is_reference": False}},
+                    ],
+                    "should": [
+                        {"term": {"resident_id": ""}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            },
+            "_source": ["resident_id", "facility_id", "photo_id", "face_id", "embedding"],
+        }
         try:
-            search_query = {
-                "size": 200,
-                "query": {
-                    "bool": {
-                        "must": [
-                            {"term": {"facility_id": facility_id}},
-                            {"term": {"is_reference": False}},
-                        ],
-                        "should": [
-                            {"term": {"resident_id": ""}},
-                        ],
-                        "minimum_should_match": 1,
-                    }
-                },
-                "_source": ["resident_id", "facility_id", "photo_id", "face_id", "embedding"],
-            }
-
-            response = client.search(index=FACE_INDEX, body=search_query)
-            unmatched = response["hits"]["hits"]
-            logger.info(f"Reclassify: found {len(unmatched)} unmatched face embeddings in facility {facility_id}")
+            from_offset = 0
+            while from_offset < RECLASSIFY_MAX_TOTAL:
+                page_size = min(RECLASSIFY_BATCH_SIZE, RECLASSIFY_MAX_TOTAL - from_offset)
+                page_query = {
+                    "size": page_size,
+                    "from": from_offset,
+                    **unmatched_query_body,
+                }
+                response = client.search(index=FACE_INDEX, body=page_query)
+                hits = response["hits"]["hits"]
+                if not hits:
+                    break
+                unmatched.extend(hits)
+                if len(hits) < page_size:
+                    break
+                from_offset += len(hits)
+            logger.info(
+                f"Reclassify: collected {len(unmatched)} unmatched face embeddings "
+                f"in facility {facility_id} (cap={RECLASSIFY_MAX_TOTAL})"
+            )
+            if len(unmatched) >= RECLASSIFY_MAX_TOTAL:
+                # 운영 경보 트리거용 — 이 시점까지 오면 facility 가 비정상적으로 많은 미분류를 쌓아둔 것
+                logger.warning(
+                    f"Reclassify: hit safety cap RECLASSIFY_MAX_TOTAL={RECLASSIFY_MAX_TOTAL} "
+                    f"for facility {facility_id}. 나머지 미분류는 다음 기준 사진 등록 시 처리됨."
+                )
 
             if not unmatched:
                 return []
