@@ -189,7 +189,7 @@ async def upload_photos(
             facility_id = real_id
 
     # 시설 소속 검증
-    verify_facility_access(current_user, facility_id)
+    await verify_facility_access(current_user, facility_id, db)
 
     uploaded_photos = []
     created_jobs = []
@@ -719,7 +719,7 @@ async def delete_photo(
     if not photo:
         raise HTTPException(status_code=404, detail="사진을 찾을 수 없습니다.")
 
-    verify_facility_access(current_user, photo.facility_id)
+    await verify_facility_access(current_user, photo.facility_id, db)
 
     await _delete_photo(photo, db, current_user["user_id"])
     await db.commit()
@@ -740,7 +740,7 @@ async def bulk_delete_photos(
         result = await db.execute(select(Photo).filter(Photo.id == pid))
         photo = result.scalar_one_or_none()
         if photo:
-            verify_facility_access(current_user, photo.facility_id)
+            await verify_facility_access(current_user, photo.facility_id, db)
             await _delete_photo(photo, db, current_user["user_id"])
             deleted += 1
 

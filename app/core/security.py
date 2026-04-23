@@ -12,6 +12,7 @@ import secrets
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 
@@ -283,18 +284,44 @@ async def get_current_guardian(
     return current_user
 
 
-def verify_facility_access(current_user: dict, facility_id: str):
+async def verify_facility_access(
+    current_user: dict,
+    facility_id: str,
+    db: AsyncSession,
+):
     """
     직원이 해당 시설에 소속되어 있는지 검증.
-    다른 시설의 데이터에 접근하는 것을 방지.
+
+    T-105: JWT payload 만 신뢰하지 않고 DB 에서 현재 사용자의 시설 소속·활성
+    상태를 재확인한다. 시설에서 제거되거나 비활성화된 사용자의 access token 이
+    만료되기 전까지 유효하게 먹히는 창(기본 60분) 동안 데이터 접근을 차단한다.
+
+    `db.get(User, uid)` 를 쓰기 때문에 동일 요청(세션) 안에서 반복 호출 시
+    identity map 캐시에서 해결되어 추가 쿼리가 발생하지 않는다 — 예: bulk
+    delete 의 사진당 호출.
     """
-    user_facility = current_user.get("facility_id")
-    if not user_facility:
+    user_id = current_user.get("user_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="유효하지 않은 인증 컨텍스트입니다.",
+        )
+
+    # 순환 import 회피 — 함수 내부에서 모델 로드.
+    from app.models.models import User
+
+    user = await db.get(User, user_id)
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="계정이 비활성화되었거나 존재하지 않습니다.",
+        )
+    if not user.facility_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="시설에 소속되지 않은 사용자입니다.",
         )
-    if user_facility != facility_id:
+    if user.facility_id != facility_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="해당 시설에 접근 권한이 없습니다.",

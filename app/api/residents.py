@@ -51,7 +51,7 @@ async def list_residents(
     db: AsyncSession = Depends(get_db),
 ):
     """시설의 모든 입소자 목록"""
-    verify_facility_access(current_user, facility_id)
+    await verify_facility_access(current_user, facility_id, db)
     stmt = select(Resident).filter(
         Resident.facility_id == facility_id,
         Resident.is_active == True,
@@ -68,7 +68,7 @@ async def create_resident(
     db: AsyncSession = Depends(get_db),
 ):
     """새 입소자 등록 (직원만)"""
-    verify_facility_access(current_user, resident.facility_id)
+    await verify_facility_access(current_user, resident.facility_id, db)
     new_resident = Resident(
         id=str(uuid.uuid4()),
         facility_id=resident.facility_id,
@@ -173,7 +173,7 @@ async def import_residents_csv(
     - gender: M, F, 남, 여 (선택)
     - 주민등록번호 뒷자리는 저장하지 않습니다 — 뒷자리 포함 시 해당 행은 거부됩니다.
     """
-    verify_facility_access(current_user, facility_id)
+    await verify_facility_access(current_user, facility_id, db)
 
     # 파일 크기 제한 (1MB — 100명 넉넉히 수용)
     raw = await file.read()
