@@ -434,13 +434,12 @@ class OpenSearchService:
                     f"score={cosine_sim:.4f}"
                 )
 
-                # OpenSearch 문서의 resident_id 업데이트
+                # refresh=True 는 매 업데이트마다 인덱스 플러시라 N개 매치 시 응답 타임아웃 유발
                 try:
                     client.update(
                         index=FACE_INDEX,
                         id=doc_id,
                         body={"doc": {"resident_id": new_resident_id}},
-                        refresh=True,
                     )
                 except Exception as e:
                     logger.warning(f"Reclassify: failed to update doc {doc_id}: {e}")
