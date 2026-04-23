@@ -221,16 +221,29 @@ class PhotoShare(Base):
 
 
 class PhotoAuditLog(Base):
-    """사진 공개/비공개 이력 추적"""
+    """
+    사진 접근·변경 이력 감사 로그.
+
+    T-101 으로 action 어휘 확장 — 기존 publish / unpublish / upload / delete
+    외에 view / share_create / share_view 를 추가. 운영 / 법적 이슈가 생겼을
+    때 "누가 언제 어떤 사진에 무슨 행위를 했는지" 재현 가능한 것이 목적.
+    """
     __tablename__ = "photo_audit_logs"
 
+    # action 값 목록 — 신규 action 추가 시 이 주석도 같이 업데이트.
+    # view          : 인증된 사용자가 사진 상세 조회
+    # share_create  : 공유 링크 생성
+    # share_view    : 공유 링크로 사진 조회 (performer = 링크 생성자)
+    # publish       : 공개 전환
+    # unpublish     : 비공개 전환
+    # delete        : 삭제
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     photo_id = Column(String(36), ForeignKey("photos.id"), nullable=False, index=True)
-    action = Column(String(50), nullable=False)  # "publish", "unpublish", "upload", "delete"
-    performed_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    action = Column(String(50), nullable=False, index=True)
+    performed_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     detail = Column(Text, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
 class PhotoProcessingJob(Base):
