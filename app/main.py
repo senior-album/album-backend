@@ -112,11 +112,16 @@ async def lifespan(app: FastAPI):
 
 
 # FastAPI 애플리케이션 생성
+# T-104: DEBUG=false (프로덕션 기본) 에서는 OpenAPI/docs 엔드포인트 비공개.
+# 스키마 자체가 정보 노출이라 인증 없이 프로덕션에 열어두지 않음.
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     description="요양원 사진 AI 분류 및 공유 플랫폼 API",
     lifespan=lifespan,
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None,
+    openapi_url="/openapi.json" if settings.DEBUG else None,
 )
 
 # CORS 미들웨어 설정

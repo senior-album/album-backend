@@ -248,7 +248,8 @@ async def import_residents_csv(
     except Exception as e:
         await db.rollback()
         logger.error(f"CSV import commit failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"DB 저장 실패: {e}")
+        # T-104: 예외 메시지는 스택/SQL 단편 유출 위험 — 일반 문구만 반환
+        raise HTTPException(status_code=500, detail="입소자 저장 중 서버 오류가 발생했습니다.")
 
     logger.info(
         f"[csv-import] facility={facility_id} created={len(created)} errors={len(errors)} by={current_user['user_id']}"
@@ -548,8 +549,9 @@ async def delete_resident_face(
         OpenSearchService.delete_embedding(doc_id)
         return {"message": "Face deleted successfully", "doc_id": doc_id}
     except Exception as e:
-        logger.error(f"Failed to delete face: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete face: {str(e)}")
+        logger.error(f"Failed to delete face: {e}", exc_info=True)
+        # T-104: OpenSearch 예외 메시지(인덱스명/쿼리 등) 유출 방지
+        raise HTTPException(status_code=500, detail="얼굴 삭제 중 서버 오류가 발생했습니다.")
 
 
 @router.get("/{resident_id}/photos", response_model=list[PhotoResponse])
