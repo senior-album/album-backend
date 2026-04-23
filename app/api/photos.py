@@ -20,7 +20,13 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.images import reencode_strip_metadata
 from app.core.redis import check_rate_limit
-from app.core.security import get_current_user, get_current_guardian, get_current_staff, verify_facility_access
+from app.core.security import (
+    get_current_user,
+    get_current_guardian,
+    get_current_staff,
+    verify_facility_access,
+    verify_photo_access,
+)
 from app.core.storage import get_storage
 from app.models.models import Photo, PhotoFace, PhotoResident, PhotoLike, PhotoShare, PhotoProcessingJob, PhotoAuditLog, Resident, Guardian, User
 from app.schemas.schemas import (
@@ -378,14 +384,22 @@ async def upload_photos(
 
 @router.get("/jobs/status")
 async def get_processing_jobs_status(
-    facility_id: str = None,
     current_user: dict = Depends(get_current_staff),
     db: AsyncSession = Depends(get_db),
 ):
-    """처리 작업 상태 조회"""
-    stmt = select(PhotoProcessingJob).order_by(desc(PhotoProcessingJob.created_at)).limit(50)
-    if facility_id:
-        stmt = stmt.filter(PhotoProcessingJob.facility_id == facility_id)
+    """처리 작업 상태 조회 (요청자 시설 범위로 강제)"""
+    from app.models.models import User
+
+    user = await db.get(User, current_user["user_id"])
+    if not user or not user.facility_id:
+        raise HTTPException(status_code=403, detail="시설에 소속되지 않은 사용자입니다.")
+
+    stmt = (
+        select(PhotoProcessingJob)
+        .filter(PhotoProcessingJob.facility_id == user.facility_id)
+        .order_by(desc(PhotoProcessingJob.created_at))
+        .limit(50)
+    )
     result = await db.execute(stmt)
     jobs = result.scalars().all()
 
@@ -422,6 +436,8 @@ async def get_photo(
     if not photo:
         raise HTTPException(status_code=404, detail="Photo not found")
 
+    await verify_photo_access(current_user, photo, db)
+
     client_ip = request.client.host if request.client else "unknown"
     _audit_photo(
         db,
@@ -440,6 +456,7 @@ async def get_facility_photos(
     facility_id: str,
     skip: int = 0,
     limit: int = 50,
+    current_user: dict = Depends(get_current_staff),
     db: AsyncSession = Depends(get_db),
 ):
     """시설의 사진 목록 (최신순, 다대다 입소자 매핑 포함)"""
@@ -451,6 +468,8 @@ async def get_facility_photos(
         real_id = fac_result.scalar_one_or_none()
         if real_id:
             facility_id = real_id
+
+    await verify_facility_access(current_user, facility_id, db)
 
     stmt = (
         select(Photo)
@@ -506,8 +525,16 @@ async def get_guardian_photos(
 async def debug_opensearch_status(
     facility_id: str = None,
     current_user: dict = Depends(get_current_staff),
+    db: AsyncSession = Depends(get_db),
 ):
-    """OpenSearch 인덱스 상태 확인 (디버그용)"""
+    """OpenSearch 인덱스 상태 확인 (디버그용, DEBUG 환경에서만 동작)"""
+    if not get_settings().DEBUG:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # 타 시설 reference 조회를 막기 위해 facility_id 필터는 본인 시설로만 제한.
+    if facility_id:
+        await verify_facility_access(current_user, facility_id, db)
+
     try:
         client = OpenSearchService.get_client()
 
@@ -582,7 +609,13 @@ async def debug_photo_residents(
     current_user: dict = Depends(get_current_staff),
     db: AsyncSession = Depends(get_db),
 ):
-    """PhotoResident 다대다 매핑 상태 디버그"""
+    """PhotoResident 다대다 매핑 상태 디버그 (DEBUG 환경에서만)"""
+    if not get_settings().DEBUG:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if facility_id:
+        await verify_facility_access(current_user, facility_id, db)
+
     try:
         # 최근 사진별 PhotoResident 레코드 확인
         stmt = select(Photo).order_by(desc(Photo.created_at)).limit(10)
@@ -644,7 +677,16 @@ async def review_photo_face(
     db: AsyncSession = Depends(get_db),
 ):
     """사진의 얼굴 분류 결과 검토 (직원이 오분류 수정)"""
-    stmt = select(PhotoFace).filter(PhotoFace.id == face_id)
+    # face_id 로 들어오지만 photo_id 경로와 일치해야 하며, 소속 시설도 검증.
+    photo_result = await db.execute(select(Photo).filter(Photo.id == photo_id))
+    photo = photo_result.scalar_one_or_none()
+    if not photo:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    await verify_facility_access(current_user, photo.facility_id, db)
+
+    stmt = select(PhotoFace).filter(
+        PhotoFace.id == face_id, PhotoFace.photo_id == photo_id
+    )
     result = await db.execute(stmt)
     face = result.scalar_one_or_none()
     if not face:
@@ -681,6 +723,8 @@ async def add_resident_tag(
     photo = photo_result.scalar_one_or_none()
     if not photo:
         raise HTTPException(status_code=404, detail="사진을 찾을 수 없습니다.")
+
+    await verify_facility_access(current_user, photo.facility_id, db)
 
     # 입소자 존재 + 같은 시설 확인
     resident_result = await db.execute(select(Resident).filter(Resident.id == resident_id))
@@ -733,6 +777,12 @@ async def remove_resident_tag(
     db: AsyncSession = Depends(get_db),
 ):
     """사진에서 입소자 태그 제거"""
+    photo_result = await db.execute(select(Photo).filter(Photo.id == photo_id))
+    photo = photo_result.scalar_one_or_none()
+    if not photo:
+        raise HTTPException(status_code=404, detail="사진을 찾을 수 없습니다.")
+    await verify_facility_access(current_user, photo.facility_id, db)
+
     result = await db.execute(
         select(PhotoResident).filter(
             PhotoResident.photo_id == photo_id,
@@ -860,6 +910,7 @@ async def bulk_publish_photos(
         result = await db.execute(select(Photo).filter(Photo.id == pid))
         photo = result.scalar_one_or_none()
         if photo:
+            await verify_facility_access(current_user, photo.facility_id, db)
             photo.is_public = is_public
             if is_public:
                 photo.published_by = current_user["user_id"]
@@ -895,6 +946,8 @@ async def toggle_publish(
     if not photo:
         raise HTTPException(status_code=404, detail="Photo not found")
 
+    await verify_facility_access(current_user, photo.facility_id, db)
+
     photo.is_public = not photo.is_public
     if photo.is_public:
         photo.published_by = current_user["user_id"]
@@ -928,9 +981,12 @@ async def toggle_like(
     await _enforce_rate_limit(f"like:{current_user['user_id']}", 60)
 
     # 사진 존재 확인
-    photo = await db.execute(select(Photo).filter(Photo.id == photo_id))
-    if not photo.scalar_one_or_none():
+    photo_result = await db.execute(select(Photo).filter(Photo.id == photo_id))
+    photo = photo_result.scalar_one_or_none()
+    if not photo:
         raise HTTPException(status_code=404, detail="Photo not found")
+
+    await verify_photo_access(current_user, photo, db)
 
     # 기존 좋아요 확인
     existing = await db.execute(
@@ -973,6 +1029,13 @@ async def get_photo_likes(
     db: AsyncSession = Depends(get_db),
 ):
     """사진의 좋아요 정보 조회"""
+    photo_result = await db.execute(select(Photo).filter(Photo.id == photo_id))
+    photo = photo_result.scalar_one_or_none()
+    if not photo:
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    await verify_photo_access(current_user, photo, db)
+
     count_result = await db.execute(
         select(func.count(PhotoLike.id)).filter(PhotoLike.photo_id == photo_id)
     )
@@ -1009,6 +1072,8 @@ async def create_share_link(
     photo_obj = photo.scalar_one_or_none()
     if not photo_obj:
         raise HTTPException(status_code=404, detail="Photo not found")
+
+    await verify_photo_access(current_user, photo_obj, db)
 
     settings = get_settings()
 
