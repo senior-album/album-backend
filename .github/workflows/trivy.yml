@@ -1,0 +1,50 @@
+name: Trivy image scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (local, not pushed)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: album-backend:scan
+          cache-from: type=gha
+
+      # 도입 초기 soft-fail — SARIF 는 계속 Security 탭에 업로드.
+      # .trivyignore 로 수용 CVE 정리 후 step 의 continue-on-error 제거 + exit-code "1" 로 전환.
+      - name: Run Trivy scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
+        with:
+          image-ref: album-backend:scan
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif

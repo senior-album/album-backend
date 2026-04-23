@@ -1,0 +1,28 @@
+name: pip-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 1 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      # 도입 초기 soft-fail — findings 는 로그에서 확인.
+      # 의존성 bump 후 step 의 continue-on-error 제거로 strict 전환.
+      - name: Run pip-audit
+        continue-on-error: true
+        run: pip-audit -r requirements.txt --strict --format columns
