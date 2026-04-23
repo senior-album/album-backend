@@ -23,3 +23,8 @@ python-magic-bin==0.4.14; sys_platform == 'win32'
 pytest==8.2.0
 pytest-asyncio==0.23.0
 insightface
+
+# T-032: 보호자 초대 QR 포스터 PDF 생성.
+# reportlab 번들의 UnicodeCIDFont(HYSMyeongJo-Medium) 로 한글 출력 — 별도 TTF 번들 불필요.
+reportlab==4.2.0
+qrcode[pil]==7.4.2

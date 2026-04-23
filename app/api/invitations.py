@@ -8,15 +8,18 @@ import uuid
 import logging
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import Response
 from sqlalchemy import select, desc, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import admin_audit
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import get_current_user, get_current_guardian, get_current_staff
 from app.models.models import Invitation, Guardian, Resident, User, Facility
 from app.schemas.schemas import InvitationCreate, InvitationResponse
 from app.services.biztalk_service import BizTalkService
+from app.services.poster import build_invitation_poster_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,53 @@ async def create_invitation(
         facility_name=facility.name if facility else None,
         resident_name=resident.name,
         created_at=invitation.created_at,
+    )
+
+
+@router.get("/{invitation_id}/poster.pdf")
+async def download_invitation_poster(
+    invitation_id: str,
+    current_user: dict = Depends(get_current_staff),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    T-032: 초대 QR 포스터 PDF 다운로드 (직원용).
+
+    시설에서 인쇄해 게시판 / 방에 붙이는 용도. QR 은 프런트엔드의 초대 수락
+    페이지 URL 을 인코드하고, 보호자가 로그인 후 accept 엔드포인트에 도달.
+    """
+    stmt = (
+        select(Invitation, Resident, Facility)
+        .join(Resident, Invitation.resident_id == Resident.id)
+        .join(Facility, Invitation.facility_id == Facility.id)
+        .filter(Invitation.id == invitation_id)
+    )
+    result = await db.execute(stmt)
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="초대를 찾을 수 없습니다.")
+
+    invitation, resident, facility = row
+
+    # 호출자가 해당 시설 직원인지 확인 — 타 시설 초대 포스터 발급 차단.
+    if current_user.get("facility_id") != facility.id:
+        raise HTTPException(status_code=403, detail="해당 시설의 초대가 아닙니다.")
+
+    settings = get_settings()
+    invite_url = f"{settings.FRONTEND_URL.rstrip('/')}/invitations/{invitation.id}"
+
+    pdf_bytes = build_invitation_poster_pdf(
+        facility_name=facility.name,
+        resident_name=resident.name,
+        invite_url=invite_url,
+        message=invitation.message,
+    )
+
+    filename = f"invite-{invitation.id[:8]}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
