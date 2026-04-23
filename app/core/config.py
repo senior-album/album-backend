@@ -10,7 +10,9 @@ from functools import lru_cache
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Senior Album API"
     VERSION: str = "0.2.0"
-    DEBUG: bool = True
+    # T-104: prod 기본은 False. 로컬 개발은 .env 에 DEBUG=true 로 opt-in.
+    # True 일 때만 /docs /redoc /openapi.json 및 SQL echo 활성화.
+    DEBUG: bool = False
 
     # PostgreSQL (로컬)
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/senior_album"
