@@ -48,6 +48,51 @@ async def _enforce_rate_limit(key: str, max_per_minute: int) -> None:
         )
 
 
+async def _enforce_photo_queue_capacity(
+    db: AsyncSession, facility_id: str, pending_to_add: int,
+) -> None:
+    """
+    T-106: PhotoProcessingJob pending 백로그 cap. 상한 초과 시 409/503 거절.
+
+    - per-facility cap: 한 시설이 공유 워커를 독점하거나 자기 큐를 폭주시키는
+      것을 차단.
+    - total cap: 전체 서버 메모리 / DB 용량 보호.
+    """
+    settings = get_settings()
+
+    fac_count = (
+        await db.execute(
+            select(func.count(PhotoProcessingJob.id)).filter(
+                PhotoProcessingJob.status == "pending",
+                PhotoProcessingJob.facility_id == facility_id,
+            )
+        )
+    ).scalar_one() or 0
+    total_count = (
+        await db.execute(
+            select(func.count(PhotoProcessingJob.id)).filter(
+                PhotoProcessingJob.status == "pending",
+            )
+        )
+    ).scalar_one() or 0
+
+    if fac_count + pending_to_add > settings.PHOTO_QUEUE_MAX_PENDING_PER_FACILITY:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"사진 처리 대기열이 포화 상태입니다 (대기 중 {fac_count}장). "
+                "잠시 후 다시 시도해주세요."
+            ),
+            headers={"Retry-After": "60"},
+        )
+    if total_count + pending_to_add > settings.PHOTO_QUEUE_MAX_PENDING_TOTAL:
+        raise HTTPException(
+            status_code=503,
+            detail="서버 처리량이 일시적으로 초과되었습니다. 잠시 후 다시 시도해주세요.",
+            headers={"Retry-After": "120"},
+        )
+
+
 def _audit_photo(
     db: AsyncSession,
     *,
@@ -72,7 +117,6 @@ def _audit_photo(
         ))
     except Exception as e:
         logger.warning(f"audit log enqueue failed ({action}, photo={photo_id}): {e}")
-
 
 # 업로드 검증 상수
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
@@ -216,7 +260,10 @@ async def upload_photos(
             facility_id = real_id
 
     # 시설 소속 검증
-    verify_facility_access(current_user, facility_id)
+    await verify_facility_access(current_user, facility_id, db)
+
+    # T-106: pending 큐가 가득 차면 업로드 자체를 거절 — 백로그로 인한 DoS 완화.
+    await _enforce_photo_queue_capacity(db, facility_id, len(files))
 
     uploaded_photos = []
     created_jobs = []
@@ -763,7 +810,7 @@ async def delete_photo(
     if not photo:
         raise HTTPException(status_code=404, detail="사진을 찾을 수 없습니다.")
 
-    verify_facility_access(current_user, photo.facility_id)
+    await verify_facility_access(current_user, photo.facility_id, db)
 
     await _delete_photo(photo, db, current_user["user_id"])
     await db.commit()
@@ -784,7 +831,7 @@ async def bulk_delete_photos(
         result = await db.execute(select(Photo).filter(Photo.id == pid))
         photo = result.scalar_one_or_none()
         if photo:
-            verify_facility_access(current_user, photo.facility_id)
+            await verify_facility_access(current_user, photo.facility_id, db)
             await _delete_photo(photo, db, current_user["user_id"])
             deleted += 1
 

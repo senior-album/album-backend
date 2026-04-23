@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import select, desc, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import admin_audit
 from app.core.database import get_db
 from app.core.security import get_current_user, get_current_guardian, get_current_staff
 from app.models.models import Invitation, Guardian, Resident, User, Facility
@@ -84,6 +85,20 @@ async def create_invitation(
         invited_by=current_user["user_id"],
     )
     db.add(invitation)
+    # T-102: 초대 발송은 시설 외부인에게 접근 권한을 부여하는 시작점 — 감사 대상.
+    # 연락처는 존재 여부만 남기고 원본은 미기록 (감사 로그 유출 시 PII 재-유출 방지).
+    admin_audit(
+        db,
+        action="invitation_create",
+        performed_by=current_user["user_id"],
+        target_type="invitation",
+        target_id=invitation.id,
+        facility_id=facility_id,
+        detail=(
+            f"resident_id={req.resident_id}, "
+            f"channel={'phone' if req.phone else 'email'}"
+        ),
+    )
     await db.commit()
 
     # 카카오 알림톡 발송 (전화번호가 있는 경우만)
