@@ -3,7 +3,7 @@
 
 # Stage 1: 빌드 의존성 설치
 # 베이스 이미지 digest pin (T-053) — tag 이동으로 인한 공급망 리스크 차단
-FROM python:3.11-slim@sha256:92c262cbb2e99cdc16218338d74fbe518055c13d224d942708f70f8042ff6d18 AS builder
+FROM python:3.14-slim@sha256:3989a23fd2c28a34c7be819e488b958a10601d421ac25bea1e7a5d757365e2d5 AS builder
 
 WORKDIR /build
 
@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Stage 2: 런타임
-FROM python:3.11-slim@sha256:92c262cbb2e99cdc16218338d74fbe518055c13d224d942708f70f8042ff6d18
+FROM python:3.14-slim@sha256:3989a23fd2c28a34c7be819e488b958a10601d421ac25bea1e7a5d757365e2d5
 
 WORKDIR /app
 
