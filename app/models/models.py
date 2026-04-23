@@ -233,6 +233,34 @@ class PhotoAuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class AdminAuditLog(Base):
+    """
+    T-102: 관리자(직원/시설 관리자) 특권 행위 감사 로그.
+
+    PhotoAuditLog 가 사진 한 장에 대한 이력을 기록한다면, 이쪽은 사진이 아닌
+    대상(보호자 승인, 초대 발송, 입소자 PII 수정 등) 에 대한 행위를 기록.
+    법적/유출 대응 시 "누가 언제 어떤 대상에 무엇을 했는가" 를 재현하기 위한
+    비 사진 이벤트 스트림.
+    """
+    __tablename__ = "admin_audit_logs"
+
+    # action 값 목록 (확장 가능) — 호출부에서 자유 문자열이지만 관례 유지:
+    # guardian_approve      : 보호자 요청 승인
+    # guardian_reject       : 보호자 요청 거부
+    # invitation_create     : 보호자 초대 발송
+    # resident_update       : 입소자 정보 수정 (이름/의료 메모 등 PII)
+    # resident_face_delete  : 등록된 기준 사진(임베딩) 삭제
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    action = Column(String(50), nullable=False, index=True)
+    performed_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    target_type = Column(String(50), nullable=False)  # "guardian" | "invitation" | "resident" ...
+    target_id = Column(String(64), nullable=False, index=True)
+    facility_id = Column(String(36), ForeignKey("facilities.id"), nullable=True, index=True)
+    detail = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 class PhotoProcessingJob(Base):
     """사진 처리 비동기 작업 큐"""
     __tablename__ = "photo_processing_jobs"
