@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     FACE_SIMILARITY_THRESHOLD: float = 0.6
     FACE_DETECTION_CONFIDENCE: float = 0.9
 
+    # T-106: 사진 처리 pending 큐 상한 (DoS / 메모리 보호)
+    PHOTO_QUEUE_MAX_PENDING_PER_FACILITY: int = 500
+    PHOTO_QUEUE_MAX_PENDING_TOTAL: int = 5000
+
     # OpenSearch (벡터 검색용 - 기존 인프라)
     OPENSEARCH_HOST: str = "localhost"
     OPENSEARCH_PORT: int = 9200
