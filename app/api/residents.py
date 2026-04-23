@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import Database, get_db
+from app.core.images import reencode_strip_metadata
 from app.core.security import get_current_user, get_current_staff, verify_facility_access
 from app.core.storage import get_storage
 from app.models.models import Resident, Photo, PhotoFace, PhotoResident
@@ -452,14 +453,16 @@ async def register_face(
             detail="No face detected in the image. Please upload a clear face photo.",
         )
 
+    # T-051 재인코딩 + EXIF/메타데이터 strip — 저장 전에 원본 정화
+    sanitized_data, sanitized_ext, sanitized_mime = reencode_strip_metadata(file_content)
+
     # 사진을 MinIO에 저장 (고유 파일명 사용)
     storage = get_storage()
-    file_ext = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
     unique_id = uuid.uuid4().hex[:8]
     object_key = await storage.upload_file(
-        file_data=file_content,
-        filename=f"face_{resident_id}_{unique_id}{file_ext}",
-        content_type=file.content_type or "image/jpeg",
+        file_data=sanitized_data,
+        filename=f"face_{resident_id}_{unique_id}.{sanitized_ext}",
+        content_type=sanitized_mime,
         facility_id=f"{resident.facility_id}/faces",
     )
     # OpenSearch에 reference embedding 저장 (object key 저장)

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.images import reencode_strip_metadata
 from app.core.redis import check_rate_limit
 from app.core.security import get_current_user, get_current_guardian, get_current_staff, verify_facility_access
 from app.core.storage import get_storage
@@ -200,21 +201,25 @@ async def upload_photos(
 
             # 업로드 검증 (크기/확장자/MIME/디코딩)
             ext, sniffed_mime = _validate_upload(file.filename or "", file_data)
-            content_type = sniffed_mime
-            filename = file.filename or f"photo{ext}"
+            original_filename = file.filename or f"photo{ext}"
 
-            # 1) MinIO에 원본 업로드 → object key만 저장
+            # T-051 재인코딩 + EXIF/메타데이터 strip — 저장 전에 원본도 정화
+            sanitized_data, sanitized_ext, sanitized_mime = reencode_strip_metadata(file_data)
+            base_name = os.path.splitext(original_filename)[0] or "photo"
+            filename = f"{base_name}.{sanitized_ext}"
+
+            # 1) MinIO에 (재인코딩된) 원본 업로드 → object key만 저장
             object_key = await storage.upload_file(
-                file_data=file_data,
+                file_data=sanitized_data,
                 filename=filename,
-                content_type=content_type,
+                content_type=sanitized_mime,
                 facility_id=facility_id,
             )
 
             # 2) 섬네일 생성 및 업로드 → object key만 저장
             thumb_key = object_key  # 섬네일 실패 시 원본 키 사용
             try:
-                img = PILImage.open(BytesIO(file_data)).convert("RGB")
+                img = PILImage.open(BytesIO(sanitized_data)).convert("RGB")
                 img_thumb = img.copy()
                 img_thumb.thumbnail((300, 300))
                 thumb_buf = BytesIO()
