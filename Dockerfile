@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /install /usr/local
 
+# Albumentations 기동 시 version check HTTP 호출을 막아 liveness timeout 방지
+ENV NO_ALBUMENTATIONS_UPDATE=1
+
 COPY app ./app
 COPY requirements.txt .
 
