@@ -31,17 +31,18 @@ jobs:
           tags: album-backend:scan
           cache-from: type=gha
 
+      # 도입 초기 soft-fail — SARIF 는 계속 Security 탭에 업로드.
+      # .trivyignore 로 수용 CVE 정리 후 step 의 continue-on-error 제거 + exit-code "1" 로 전환.
       - name: Run Trivy scanner
         uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
         with:
           image-ref: album-backend:scan
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          # 도입 초기 soft-fail — SARIF 는 계속 업로드돼서 Security 탭에서 추적.
-          # .trivyignore 로 수용 CVE 정리 후 "1" 로 전환.
-          exit-code: "0"
+          exit-code: "1"
 
       - name: Upload SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3

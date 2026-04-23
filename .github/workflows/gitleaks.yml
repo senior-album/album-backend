@@ -12,13 +12,14 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    # 도입 초기 soft-fail — roadmap#87 당시 평문 흔적이 history 에 남아있으면
-    # 현재 시점 fail 의 원인이 됨. allowlist 정리 후 이 줄 제거.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # 도입 초기 soft-fail — history 에 roadmap#87 평문 흔적이 남아있으면
+      # 현재 시점 fail 의 원인이 됨. allowlist 정리 후 step 의
+      # continue-on-error 제거로 strict 전환.
       - uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
