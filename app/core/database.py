@@ -80,6 +80,10 @@ class Database:
             ("photos", "uploaded_by", "VARCHAR(36)", "NULL"),
             # photo_shares 테이블
             ("photo_shares", "expires_at", "TIMESTAMP", "NULL"),
+            # invitations 테이블 — 이메일 초대 추가 (d3004bc)
+            ("invitations", "email", "VARCHAR(255)", "NULL"),
+            # users 테이블 — OTP 게이트 (e81db45)
+            ("users", "phone_verified_at", "TIMESTAMP", "NULL"),
         ]
 
         for table, column, col_type, default in columns_to_ensure:
@@ -97,6 +101,22 @@ class Database:
                     logger.info(f"[migration] Added column {table}.{column} ({col_type})")
             except Exception as e:
                 logger.warning(f"[migration] Could not add {table}.{column}: {e}")
+
+        # NOT NULL → NULL 로 완화된 컬럼 (모델 기준). 이미 NULLABLE 면 PG 는 NOTICE 만 내고 no-op.
+        # (테이블명, 컬럼명)
+        drop_not_null = [
+            # d3004bc — 이메일 초대, 시설코드 요청으로 phone/resident_id 모두 optional 이 됨
+            ("invitations", "phone"),
+            ("guardians", "resident_id"),
+        ]
+        for table, column in drop_not_null:
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL"
+                ))
+                logger.info(f"[migration] Dropped NOT NULL on {table}.{column}")
+            except Exception as e:
+                logger.warning(f"[migration] Could not drop NOT NULL on {table}.{column}: {e}")
 
         # 기존 사진 중 is_public이 NULL인 것들을 FALSE로 설정
         try:
