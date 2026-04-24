@@ -16,9 +16,21 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      # Strict 모드 — .gitleaksignore 로 test fixture 허용 정리 완료. 신규 leak
-      # 발견 시 CI 실패. 새로운 false positive 면 .gitleaksignore 에 fingerprint
-      # 추가 (docs/SECRETS.md 참조).
-      - uses: gitleaks/gitleaks-action@v2
+
+      # gitleaks 바이너리 직접 사용 — gitleaks-action@v2 는 Organization 레포에
+      # 대해 GITLEAKS_LICENSE 환경변수를 요구해서 미설정 시 실패한다.
+      # 바이너리 자체는 MIT 라이선스로 자유롭게 사용 가능.
+      - name: Install gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.21.2"
+        run: |
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # .gitleaksignore 는 repo 루트에서 자동으로 읽힘. leak 발견 시 exit 1
+      # → job 실패. 새 false positive 는 .gitleaksignore 에 fingerprint 추가.
+      - name: Scan
+        run: gitleaks git --no-banner --redact --verbose
