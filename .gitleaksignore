@@ -1,0 +1,10 @@
+# gitleaks ignore list — 스캐너가 false positive 로 잡는 특정 finding 을 fingerprint 로 면제.
+# Format: <commit-sha>:<file-path>:<rule-id>:<line-number>
+#
+# 추가하기 전에 반드시:
+#   1. 실제 시크릿인지 수동 검증
+#   2. 테스트 픽스처 / placeholder 인지 확인
+#   3. 주석으로 왜 면제했는지 남기기
+
+# 테스트 픽스처 — 서명 부분이 문자열 "test" 인 더미 JWT. 실제 유효한 토큰 아님.
+80e656be2c2e1a8b263fa0b711574f097e6008d3:tests/conftest.py:generic-api-key:46
