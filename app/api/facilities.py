@@ -16,7 +16,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.redis import check_rate_limit
 from app.core.security import get_current_user, get_current_staff
-from app.models.models import Facility, User, Resident, Photo, PhotoResident, PhotoLike
+from app.models.models import (
+    Facility,
+    User,
+    Resident,
+    Photo,
+    PhotoResident,
+    PhotoLike,
+    Guardian,
+    Invitation,
+)
+from app.services.opensearch_service import OpenSearchService, FACE_INDEX
 from app.schemas.schemas import (
     FacilityCreate,
     FacilityUpdate,
@@ -389,6 +399,100 @@ async def get_facility_stats(
 
     classification_rate = round((classified_photos / total_photos * 100), 1) if total_photos > 0 else 0
 
+    # T-031: 시설장 조치 항목 4 종 — 보호자 초대 / 미연결 어르신 / 미처리 사진 / 얼굴 미등록
+
+    # 1) 보호자 초대 현황 — status 별 GROUP BY
+    invite_stmt = (
+        select(Invitation.status, func.count(Invitation.id))
+        .filter(Invitation.facility_id == facility_id)
+        .group_by(Invitation.status)
+    )
+    invite_rows = (await db.execute(invite_stmt)).all()
+    invite_counts = {row[0]: row[1] for row in invite_rows}
+    invitations_summary = {
+        "pending": invite_counts.get("pending", 0),
+        "accepted": invite_counts.get("accepted", 0),
+        "rejected": invite_counts.get("rejected", 0),
+    }
+
+    # 2) 미연결 어르신 — 승인된(is_approved=True, is_rejected=False) Guardian 이 한 명도 없는 active Resident.
+    # Guardian.resident_id 는 초기 요청 시 null 이었다가 승인+배정 후 채워지므로 notin 비교 대상에서 null 은 자동 제외됨.
+    approved_resident_ids_subq = (
+        select(Guardian.resident_id)
+        .filter(
+            Guardian.resident_id.isnot(None),
+            Guardian.is_approved == True,
+            Guardian.is_rejected == False,
+        )
+        .scalar_subquery()
+    )
+    no_guardian_stmt = (
+        select(Resident)
+        .filter(
+            Resident.facility_id == facility_id,
+            Resident.is_active == True,
+            Resident.id.notin_(approved_resident_ids_subq),
+        )
+        .order_by(Resident.created_at.desc())
+    )
+    no_guardian_residents = (await db.execute(no_guardian_stmt)).scalars().all()
+    residents_without_guardian = {
+        "count": len(no_guardian_residents),
+        "topNames": [r.name for r in no_guardian_residents[:3]],
+    }
+
+    # 3) 미처리 사진 — detected_unmatched / no_model / no_face.
+    # pending/queued 는 진행 중이라 제외, classified/completed 는 성공이라 제외.
+    UNPROCESSED_STATUSES = ["detected_unmatched", "no_model", "no_face"]
+    unprocessed_stmt = select(func.count(Photo.id)).filter(
+        Photo.facility_id == facility_id,
+        Photo.processing_status.in_(UNPROCESSED_STATUSES),
+    )
+    photos_unprocessed = (await db.execute(unprocessed_stmt)).scalar() or 0
+
+    # 4) 얼굴 미등록 — OpenSearch 에서 is_reference=True 레코드가 없는 active Resident.
+    # OpenSearch 장애 시 집계 0 으로 fallback (로그만 남김, 응답은 200 유지).
+    all_residents_stmt = (
+        select(Resident)
+        .filter(
+            Resident.facility_id == facility_id,
+            Resident.is_active == True,
+        )
+        .order_by(Resident.created_at.desc())
+    )
+    all_residents = (await db.execute(all_residents_stmt)).scalars().all()
+    residents_with_face_ids: set[str] = set()
+    try:
+        client = OpenSearchService.get_client()
+        resp = client.search(
+            index=FACE_INDEX,
+            body={
+                "size": 0,
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"facility_id": facility_id}},
+                            {"term": {"is_reference": True}},
+                        ]
+                    }
+                },
+                "aggs": {
+                    "residents": {
+                        "terms": {"field": "resident_id", "size": 10000},
+                    }
+                },
+            },
+        )
+        buckets = resp.get("aggregations", {}).get("residents", {}).get("buckets", [])
+        residents_with_face_ids = {b["key"] for b in buckets if b.get("key")}
+    except Exception as e:
+        logger.warning(f"[stats] OpenSearch reference aggregation failed: {e}")
+    no_face_residents = [r for r in all_residents if r.id not in residents_with_face_ids]
+    residents_without_face = {
+        "count": len(no_face_residents),
+        "topNames": [r.name for r in no_face_residents[:3]],
+    }
+
     return {
         "totalPhotos": total_photos,
         "photosToday": photos_today,
@@ -397,4 +501,9 @@ async def get_facility_stats(
         "classificationRate": classification_rate,
         "facilityName": facility.name,
         "facilityCode": facility.code,
+        # T-031
+        "invitations": invitations_summary,
+        "residentsWithoutGuardian": residents_without_guardian,
+        "photosUnprocessed": photos_unprocessed,
+        "residentsWithoutFace": residents_without_face,
     }
