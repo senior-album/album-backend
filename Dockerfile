@@ -35,6 +35,10 @@ ENV NO_ALBUMENTATIONS_UPDATE=1
 
 COPY app ./app
 COPY requirements.txt .
+# Alembic (DB migrations) — PR #57 로 추가됐지만 Dockerfile COPY 누락돼서
+# 컨테이너에서 `alembic` CLI 가 script_location 을 못 찾아 실패했던 문제 수정.
+COPY alembic.ini .
+COPY alembic ./alembic
 
 # InsightFace buffalo_l 모델 자동 다운로드
 RUN python -c "\
