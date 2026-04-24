@@ -69,9 +69,6 @@ class Settings(BaseSettings):
     OPENSEARCH_HOST: str = "localhost"
     OPENSEARCH_PORT: int = 9200
 
-    # DDL 자동 관리 (JPA의 ddl-auto 같은 역할)
-    DDL_AUTO: str = "create"
-
     # 카카오 OAuth
     KAKAO_CLIENT_ID: str = ""
     KAKAO_CLIENT_SECRET: str = ""
@@ -118,6 +115,10 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        # 제거된 env 가 환경/configmap 에 남아있어도 기동을 막지 않게 한다.
+        # 예: Alembic Phase 2 에서 DDL_AUTO 를 제거했지만 클러스터 configmap 에
+        #     아직 남아있을 때.
+        extra = "ignore"
 
 
 @lru_cache()

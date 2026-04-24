@@ -79,8 +79,7 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 서버 시작 시 자동으로 수행되는 작업:
-- DB 테이블 생성/검증 (DDL_AUTO 설정에 따라)
-- 누락된 컬럼 자동 추가 (ALTER TABLE)
+- `alembic upgrade head` — Alembic 마이그레이션 적용 (컨테이너 CMD)
 - Redis 연결 시도
 - InsightFace 모델 로드
 - OpenSearch 인덱스 초기화
@@ -101,7 +100,6 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 | `LOGIN_MAX_ATTEMPTS` | 로그인 시도 제한 | `5` |
 | `LOGIN_LOCKOUT_MINUTES` | 잠금 시간(분) | `15` |
 | `SHARE_LINK_EXPIRE_HOURS` | 공유 링크 만료(시간) | `72` |
-| `DDL_AUTO` | DDL 관리 모드 | `create` |
 | `KAKAO_CLIENT_ID` | 카카오 앱 키 | (선택) |
 | `FRONTEND_URL` | 프론트엔드 URL | `http://localhost:5173` |
 | `API_BASE_URL` | API 외부 URL | `http://localhost:8000` |
@@ -174,13 +172,12 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ## 데이터베이스 관리
 
-### DDL_AUTO 모드
-- `create`: 테이블 없으면 생성 + 누락 컬럼 자동 ALTER TABLE (개발용)
-- `create-drop`: 시작할 때 전체 DROP 후 재생성 (테스트용)
-- `none`: DDL 건드리지 않음 (프로덕션 — Alembic 사용)
+스키마는 Alembic 이 관리합니다. 자세한 워크플로우는 [`docs/MIGRATIONS.md`](docs/MIGRATIONS.md) 참조.
 
-### 자동 마이그레이션
-`DDL_AUTO=create` 시 `_add_missing_columns()`가 `information_schema`를 조회해 누락된 컬럼을 자동 추가합니다. Alembic 없이도 개발 단계에서 스키마 변경을 반영할 수 있습니다.
+요약:
+- 모델 변경 → `alembic revision --autogenerate -m "설명"` → 리뷰 → 커밋
+- 로컬: `alembic upgrade head` 수동 실행 (또는 컨테이너에서 자동)
+- 컨테이너 기동 시 자동으로 `alembic upgrade head` 실행 (Dockerfile CMD)
 
 ## 얼굴 인식
 

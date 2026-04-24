@@ -1,0 +1,62 @@
+name: PR Check
+
+# 모델 변경이 들어왔는데 해당 migration 이 함께 커밋되지 않으면 막는다.
+# `alembic check` 는 target_metadata (모델) 와 현재 DB 상태를 비교해 diff 가
+# 있으면 non-zero exit — migration 파일을 빠뜨린 PR 을 CI 에서 차단.
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  alembic-check:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U ci"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+
+    env:
+      # env.py 는 Settings 를 거쳐 URL 을 만드므로 POSTGRES_* 로 주입.
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ci
+      POSTGRES_PASSWORD: ci
+      POSTGRES_DB: ci
+      # Settings 가 필수로 요구하는 env — CI 전용 더미 값
+      JWT_SECRET: ci-dummy-secret
+      JWT_REFRESH_SECRET: ci-dummy-refresh-secret
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: alembic upgrade head (빈 DB 에 전체 마이그레이션 적용)
+        run: alembic upgrade head
+
+      - name: alembic check (모델-마이그레이션 동기화 검증)
+        # `alembic check` 는 target_metadata 와 현재 DB 를 비교해 diff 가 없어야
+        # pass. 모델을 바꾸고 revision 을 안 만든 PR 은 여기서 실패한다.
+        run: alembic check

@@ -23,11 +23,11 @@ alembic upgrade head
 git add alembic/versions/ app/models/models.py
 ```
 
-## 현재 상태 (Phase 1 — 2026-04)
+## 현재 상태
 
 - `001_baseline` 리비전이 head.
-- **프로덕션 DB 는 아직 alembic_version 테이블이 없음** — stamping 필요 (아래 참조).
-- 컨테이너 기동 시 alembic 이 **자동 실행되지 않음** — `DDL_AUTO=create` 가 병행 운영 중. Phase 2 에서 컷오버 예정.
+- 컨테이너 기동 시 `alembic upgrade head` 가 자동 실행 (Dockerfile CMD). 실패하면 컨테이너가 죽고 k8s 재시작.
+- `DDL_AUTO` / `_add_missing_columns` 제거됨 — Alembic 이 유일한 스키마 소스.
 
 ## 프로덕션 최초 반영 (1회 수동 작업)
 
