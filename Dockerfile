@@ -57,4 +57,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# 기동 시 DB 마이그레이션을 먼저 적용한 후 uvicorn 실행.
+# - `alembic upgrade head` 가 실패하면 컨테이너가 죽고 k8s 가 재시작 → fail-fast.
+# - `exec` 로 uvicorn 을 띄워 shell 이 중간에 끼지 않게 하고 signal (SIGTERM) 이
+#   그대로 uvicorn 에 전달되도록 한다.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"]
