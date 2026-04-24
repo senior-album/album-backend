@@ -2,7 +2,7 @@
 환경 변수 및 애플리케이션 설정
 """
 
-from pydantic import Field
+from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -14,8 +14,25 @@ class Settings(BaseSettings):
     # True 일 때만 /docs /redoc /openapi.json 및 SQL echo 활성화.
     DEBUG: bool = False
 
-    # PostgreSQL (로컬)
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/senior_album"
+    # PostgreSQL — 부분 env 로 분해 (roadmap#87 구조 변경).
+    # POSTGRES_PASSWORD 만 SealedSecret, 나머지는 ConfigMap.
+    # DATABASE_URL 을 명시적으로 주면 우선 사용 (로컬 .env 호환).
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_USER: str = "postgres"
+    POSTGRES_PASSWORD: str = "postgres"
+    POSTGRES_DB: str = "senior_album"
+    DATABASE_URL: str = ""
+
+    @computed_field
+    @property
+    def database_url(self) -> str:
+        if self.DATABASE_URL:
+            return self.DATABASE_URL
+        return (
+            f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
 
     # Redis (로컬)
     REDIS_URL: str = "redis://localhost:6379/0"
