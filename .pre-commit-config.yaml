@@ -1,0 +1,32 @@
+# pre-commit hooks — 커밋 직전에 로컬에서 시크릿 누출 / 포맷 이슈 차단.
+#
+# 설치:
+#   pip install pre-commit
+#   pre-commit install
+#
+# 수동 전체 스캔:
+#   pre-commit run --all-files
+#
+# gitleaks 자체는 Go 바이너리라 Python 환경에 안 잡히지만, pre-commit 프레임워크가
+# 자동으로 해당 repo 를 pull 해서 훅을 빌드한다. 따로 바이너리 설치 안 해도 됨.
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        # .gitleaksignore 는 자동으로 읽힘. 커밋할 diff 만 스캔 (full history 아님)
+        # 이라 빠름.
+
+  # 간단한 기본 hygiene — 공백, 큰 파일, 깨진 merge conflict marker 등
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=2000"]
+      - id: check-yaml
+      - id: check-toml
+      - id: detect-private-key

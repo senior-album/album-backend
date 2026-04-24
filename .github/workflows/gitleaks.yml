@@ -16,10 +16,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      # 도입 초기 soft-fail — history 에 roadmap#87 평문 흔적이 남아있으면
-      # 현재 시점 fail 의 원인이 됨. allowlist 정리 후 step 의
-      # continue-on-error 제거로 strict 전환.
+      # Strict 모드 — .gitleaksignore 로 test fixture 허용 정리 완료. 신규 leak
+      # 발견 시 CI 실패. 새로운 false positive 면 .gitleaksignore 에 fingerprint
+      # 추가 (docs/SECRETS.md 참조).
       - uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
