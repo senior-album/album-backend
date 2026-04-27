@@ -37,12 +37,34 @@ class RegisterStaffRequest(BaseModel):
     facilityCode: str
 
 
+class ConsentInput(BaseModel):
+    """가입 시 사용자가 보내는 동의 항목 — 활성 ConsentDocument 1건당 1개."""
+    document_id: str
+    agreed: bool
+
+
+class ConsentDocumentResponse(BaseModel):
+    """활성 약관 응답 — 가입 폼이 이걸로 체크박스 + 본문 모달을 그린다."""
+    id: str
+    type: str
+    version: str
+    title: str
+    content: str
+    is_mandatory: bool
+    effective_from: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class RegisterGuardianRequest(BaseModel):
     """보호자 가입 (단순 가입 — 시설/입소자 연결은 별도 요청)"""
     email: EmailStr
     password: str
     name: str
     phone: Optional[str] = None
+    # T-020: 가입 시 활성 필수 약관 모두 agreed=True 여야 함. 선택 항목은 거부도 함께 기록.
+    consents: List[ConsentInput] = Field(default_factory=list)
 
 
 class PhoneOtpSendRequest(BaseModel):
