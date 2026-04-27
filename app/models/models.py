@@ -39,6 +39,9 @@ class User(Base):
     password_hash = Column(String(255), nullable=True)  # 소셜 로그인은 비밀번호 없음
     role = Column(String(20), nullable=False, index=True)
     is_admin = Column(Boolean, default=False)
+    # 운영자 (Senior Album 자체 운영 주체) — 약관/처리방침 publish, legal_settings 편집 권한.
+    # 시설 관리자 (is_admin) 와 별개. 부트스트랩은 OPERATOR_EMAIL env + 시작 시 promote.
+    is_operator = Column(Boolean, default=False, nullable=False)
 
     # 소셜 로그인
     provider = Column(String(20), nullable=True, index=True)  # "kakao", "google", None(이메일)
@@ -366,6 +369,21 @@ class UserConsent(Base):
 
     user = relationship("User", foreign_keys=[user_id])
     document = relationship("ConsentDocument", foreign_keys=[document_id])
+
+
+class LegalSetting(Base):
+    """
+    T-020: 운영자 (Senior Album) 의 회사·연락처·시행일 등 법령 표기용 KV.
+    PrivacyPage / TermsPage 가 본문 외에 "이 회사가 누구이며, 누구에게 문의해야 하는가" 를
+    렌더링할 때 참조. consent_documents.content (약관 본문) 와는 별도 — 본문은 versioning 이
+    필요하지만 회사 정보는 한 번에 1 값만 유효하므로 KV 가 적합.
+    """
+    __tablename__ = "legal_settings"
+
+    key = Column(String(64), primary_key=True)
+    value = Column(Text, nullable=False, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_by_user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
 
 
 class RefreshToken(Base):
