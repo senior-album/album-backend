@@ -87,6 +87,7 @@ class UserResponse(BaseModel):
     name: str
     role: str
     is_admin: bool = False
+    is_operator: bool = False  # T-020: Senior Album 운영자 (legal_settings/약관 publish 권한)
     facility_id: Optional[str] = None
     phone: Optional[str] = None
     is_active: bool = True
