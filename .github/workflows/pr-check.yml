@@ -37,6 +37,9 @@ jobs:
       # Settings 가 필수로 요구하는 env — CI 전용 더미 값
       JWT_SECRET: ci-dummy-secret
       JWT_REFRESH_SECRET: ci-dummy-refresh-secret
+      # T-003 envelope encryption — base64(32 zero bytes). 운영 키 아님.
+      RESIDENT_PII_KEK: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      RESIDENT_NAME_HMAC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
     steps:
       - name: Checkout
