@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     Column, String, Integer, Float, DateTime, Text, Boolean, ForeignKey, JSON,
+    LargeBinary,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -69,6 +70,14 @@ class Resident(Base):
     gender = Column(String(10), nullable=True)
     room_number = Column(String(50), nullable=True)
     medical_notes = Column(Text, nullable=True)
+
+    # T-003 envelope encryption — write 경로는 T-003-2 에서 추가, read 는 T-003-4. 이 단계는 컬럼만.
+    # Layout: name_ct = nonce(12B) || AESGCM(dek).encrypt(name_utf8). dek_wrapped = nonce(12B) || AESGCM(KEK).encrypt(dek). row 당 dek 1개를 PII 컬럼들이 공유.
+    name_ct = Column(LargeBinary, nullable=True)
+    name_blind_idx = Column(LargeBinary, nullable=True, index=True)
+    birth_date_ct = Column(LargeBinary, nullable=True)
+    medical_notes_ct = Column(LargeBinary, nullable=True)
+    dek_wrapped = Column(LargeBinary, nullable=True)
 
     facility = relationship("Facility", back_populates="residents")
     guardians = relationship("Guardian", back_populates="resident")
