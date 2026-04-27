@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     Column, String, Integer, Float, DateTime, Text, Boolean, ForeignKey, JSON,
-    LargeBinary,
+    LargeBinary, UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -321,6 +321,51 @@ class Notification(Base):
     read_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ConsentDocument(Base):
+    """
+    T-020: 약관·처리방침·민감정보·마케팅 동의 문서.
+    type+version 으로 유니크. 가입 시점에 어느 문서 어느 버전에 동의했는지를
+    user_consents 가 참조 — 추후 "동의받은 시점의 약관 원문" 사본 제출 요구
+    대응을 위해 본문(content) 자체를 row 에 저장.
+    개정 시 새 row 발행 → 기존 version 은 effective_until 로 마감.
+    """
+    __tablename__ = "consent_documents"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    type = Column(String(30), nullable=False, index=True)
+    # 'terms_guardian' | 'privacy' | 'sensitive_info' | 'marketing'
+    version = Column(String(20), nullable=False)
+    title = Column(String(200), nullable=False)
+    content = Column(Text, nullable=False)
+    is_mandatory = Column(Boolean, default=True, nullable=False)
+    effective_from = Column(DateTime, nullable=False)
+    effective_until = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("type", "version", name="uq_consent_documents_type_version"),
+    )
+
+
+class UserConsent(Base):
+    """
+    T-020: 사용자가 가입 시점에 어느 문서에 동의/거부했는지 기록.
+    선택 항목(마케팅 등) 미체크도 row 로 남김 — 추후 재동의 안내·감사 대응에 참조.
+    """
+    __tablename__ = "user_consents"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id = Column(String(36), ForeignKey("consent_documents.id"), nullable=False, index=True)
+    agreed = Column(Boolean, nullable=False)
+    agreed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+
+    user = relationship("User", foreign_keys=[user_id])
+    document = relationship("ConsentDocument", foreign_keys=[document_id])
 
 
 class RefreshToken(Base):

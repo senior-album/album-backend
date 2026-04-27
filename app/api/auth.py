@@ -12,7 +12,7 @@ import time
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, and_, or_
 from passlib.context import CryptContext
 
 from app.core.config import get_settings
@@ -27,7 +27,10 @@ from app.core.security import (
     REFRESH_COOKIE_NAME,
 )
 from app.core.redis import check_rate_limit, clear_rate_limit
-from app.models.models import User, Facility, Resident, Guardian, RefreshToken
+from app.models.models import (
+    User, Facility, Resident, Guardian, RefreshToken,
+    ConsentDocument, UserConsent,
+)
 from app.schemas.schemas import (
     LoginRequest,
     RegisterAdminRequest,
@@ -378,10 +381,66 @@ async def register_staff(request: RegisterStaffRequest, req: Request, db: AsyncS
     return response
 
 
+async def _validate_and_record_consents(
+    db: AsyncSession,
+    user_id: str,
+    consents,
+    req: Request,
+) -> None:
+    """
+    T-020: 활성 ConsentDocument 와 사용자 입력 consents 를 대조해
+    필수 약관 동의 여부를 검증하고, 동의/거부 모두 user_consents 에 기록.
+    필수 미동의 시 HTTPException(400) 을 던진다.
+    호출자 측 db.flush() 이후, 토큰 발급 전에 호출.
+    """
+    now = datetime.utcnow()
+    active_stmt = select(ConsentDocument).where(
+        and_(
+            ConsentDocument.effective_from <= now,
+            or_(
+                ConsentDocument.effective_until.is_(None),
+                ConsentDocument.effective_until > now,
+            ),
+        )
+    )
+    active_docs = (await db.execute(active_stmt)).scalars().all()
+
+    by_type_latest: dict[str, ConsentDocument] = {}
+    for d in active_docs:
+        if d.type not in by_type_latest or d.effective_from > by_type_latest[d.type].effective_from:
+            by_type_latest[d.type] = d
+
+    active_doc_ids = {d.id for d in by_type_latest.values()}
+    consent_map = {c.document_id: c.agreed for c in consents}
+
+    for t, doc in by_type_latest.items():
+        if doc.is_mandatory and not consent_map.get(doc.id, False):
+            raise HTTPException(
+                status_code=400,
+                detail=f"필수 약관 동의가 필요합니다: {t} ({doc.version})",
+            )
+
+    ip = req.client.host if req.client else None
+    ua = (req.headers.get("user-agent", "") or "")[:500]
+    for c in consents:
+        if c.document_id not in active_doc_ids:
+            # 비활성/존재하지 않는 문서 ID 는 무시 (오래된 폼 캐시 방어)
+            continue
+        db.add(UserConsent(
+            user_id=user_id,
+            document_id=c.document_id,
+            agreed=c.agreed,
+            agreed_at=now,
+            ip_address=ip,
+            user_agent=ua,
+        ))
+
+
 @router.post("/register/guardian")
 async def register_guardian(request: RegisterGuardianRequest, req: Request, db: AsyncSession = Depends(get_db)):
     """
-    보호자 가입 — 단순 계정 생성만 (시설/입소자 연결은 별도 요청)
+    보호자 가입 — 단순 계정 생성만 (시설/입소자 연결은 별도 요청).
+    T-020: 활성 필수 약관 (이용약관·처리방침·민감정보) 동의 검증 + 동의 로그 저장.
     """
     # 이메일 중복 확인
     stmt = select(User).filter(User.email == request.email)
@@ -402,6 +461,9 @@ async def register_guardian(request: RegisterGuardianRequest, req: Request, db: 
     )
     db.add(user)
     await db.flush()
+
+    # T-020: 동의 검증 및 기록 — 필수 미동의 시 400
+    await _validate_and_record_consents(db, user_id, request.consents, req)
 
     family_id = str(uuid.uuid4())
     access_token, refresh_jwt = await _issue_token_pair(db, user, family_id, req)
