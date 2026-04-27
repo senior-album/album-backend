@@ -19,6 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import admin_audit
 from app.core.config import get_settings
+from app.core.crypto import (
+    blind_index,
+    encrypt_field,
+    generate_dek,
+    unwrap_dek,
+    wrap_dek,
+)
 from app.core.database import Database, get_db
 from app.core.images import reencode_strip_metadata
 from app.core.security import get_current_user, get_current_staff, verify_facility_access
@@ -43,6 +50,27 @@ router = APIRouter(prefix="/residents", tags=["residents"])
 def generate_resident_code() -> str:
     """입소자 코드 생성 (RES-XXXXXX)"""
     return f"RES-{uuid.uuid4().hex[:6].upper()}"
+
+
+def _apply_pii_encryption(resident: Resident) -> None:
+    """T-003 dual-write — 평문 PII 컬럼에서 ciphertext / blind-index 컬럼을 동기화.
+
+    DEK 가 row 에 없으면 새로 생성 + wrap. 평문이 None 이면 ciphertext 도 그대로 둠
+    (새 row 일 때 None 채우기 / 갱신 안 된 필드 보존). 평문 컬럼은 손대지 않음 — 4단계
+    (T-003-4) 에서 read 가 ciphertext 로 완전히 넘어간 다음 write 평문도 멈춘다.
+    """
+    if resident.dek_wrapped is None:
+        dek = generate_dek()
+        resident.dek_wrapped = wrap_dek(dek)
+    else:
+        dek = unwrap_dek(resident.dek_wrapped)
+    if resident.name is not None:
+        resident.name_ct = encrypt_field(resident.name, dek)
+        resident.name_blind_idx = blind_index(resident.name)
+    if resident.birth_date is not None:
+        resident.birth_date_ct = encrypt_field(resident.birth_date, dek)
+    if resident.medical_notes is not None:
+        resident.medical_notes_ct = encrypt_field(resident.medical_notes, dek)
 
 
 @router.get("", response_model=list[ResidentResponse])
@@ -80,6 +108,7 @@ async def create_resident(
         room_number=resident.room_number,
         medical_notes=resident.medical_notes,
     )
+    _apply_pii_encryption(new_resident)
     db.add(new_resident)
     await db.commit()
     await db.refresh(new_resident)
@@ -241,6 +270,7 @@ async def import_residents_csv(
             room_number=cleaned.get("room_number") or None,
             medical_notes=cleaned.get("medical_notes") or None,
         )
+        _apply_pii_encryption(new_resident)
         db.add(new_resident)
         created.append({"row": idx, "name": name, "id": new_resident.id, "code": new_resident.code})
 
@@ -308,6 +338,8 @@ async def update_resident(
     if resident_update.medical_notes is not None:
         resident.medical_notes = resident_update.medical_notes
         changed_fields.append("medical_notes")
+
+    _apply_pii_encryption(resident)
 
     # T-102: 입소자 정보 수정 — 이름/의료 메모 등 PII 변경. 실제 값 대신
     # 변경된 필드명만 기록 (로그에 PII 재-저장 회피).

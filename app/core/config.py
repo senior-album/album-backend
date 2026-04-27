@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     JWT_EXPIRE_MINUTES: int = 60  # access: 60분 (T-009 이전엔 7일)
     JWT_REFRESH_EXPIRE_MINUTES: int = 60 * 24 * 14  # refresh: 14일 (B1 rotation)
 
+    # T-003 envelope encryption — Resident PII (name / birth_date / medical_notes).
+    # 둘 다 base64 로 인코딩된 32바이트 키 (`openssl rand -base64 32` 결과 그대로).
+    # SealedSecret backend-secret 에 박혀있어야 하며, 누락 시 startup fail.
+    RESIDENT_PII_KEK: str = Field(...)  # AES-256-GCM KEK
+    RESIDENT_NAME_HMAC_KEY: str = Field(...)  # HMAC-SHA256 blind-index 키
+
     # MinIO / S3 (로컬 or 나중에 AWS)
     MINIO_ENDPOINT: str = "localhost:9000"
     MINIO_ACCESS_KEY: str = "minioadmin"

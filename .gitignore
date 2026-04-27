@@ -68,8 +68,10 @@ tmp/
 temp/
 .tmp/
 
-# InsightFace models (Dockerfile 런타임 stage 에서 buffalo_l 자동 다운로드)
-models/
+# InsightFace models (Dockerfile 런타임 stage 에서 buffalo_l 자동 다운로드).
+# 앞 슬래시는 repo root 의 `models/` 만 잡기 위함 — 없으면 SQLAlchemy 모델
+# 디렉토리 (`app/models/`) 까지 같이 매칭돼서 소스 추가가 막힘.
+/models/
 
 # Docker
 .dockerignore
