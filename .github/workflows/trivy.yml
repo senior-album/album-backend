@@ -7,9 +7,10 @@ on:
     - cron: "0 2 * * 1"
   workflow_dispatch: {}
 
+# GHAS Code Scanning 미사용 (private org repo, 라이선스 안 삼) — SARIF 는 Security 탭이 아닌
+# workflow artifact 로 떨군다. security-events 권한 불필요.
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   scan:
@@ -30,21 +31,36 @@ jobs:
           tags: album-backend:scan
           cache-from: type=gha
 
-      # 도입 초기 soft-fail — SARIF 는 계속 Security 탭에 업로드.
-      # .trivyignore 로 수용 CVE 정리 후 step 의 continue-on-error 제거 + exit-code "1" 로 전환.
-      - name: Run Trivy scanner
+      # 도입 초기 soft-fail — exit-code "1" 이지만 continue-on-error 로 step 만 빨갛게 표시.
+      # .trivyignore 정리 후 continue-on-error 제거로 strict 전환.
+      # 콘솔 table: run 로그에서 한눈에 CVE 확인용.
+      - name: Run Trivy (table to console)
         uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
+        with:
+          image-ref: album-backend:scan
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # SARIF: artifact 로 보관 — 추후 viewer / 외부 분석에 사용. exit-code "0" 으로
+      # 이 step 자체는 항상 통과 (판정은 위 table step 이 담당).
+      - name: Run Trivy (SARIF for artifact)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: album-backend:scan
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          exit-code: "1"
+          exit-code: "0"
 
-      - name: Upload SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v4
+      - name: Upload SARIF as artifact
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: trivy-results.sarif
+          name: trivy-sarif
+          path: trivy-results.sarif
+          retention-days: 30
