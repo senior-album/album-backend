@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -391,3 +392,28 @@ async def verify_photo_access(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="해당 사진에 접근 권한이 없습니다.",
     )
+
+
+async def require_operator(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    T-020: 운영자 (Senior Album) 권한 검사. 약관/처리방침 publish, legal_settings 편집용.
+    JWT 에 is_operator 클레임이 없어 DB 재확인 — 토큰 발급 후 권한 박탈된 사용자가
+    토큰 만료 전까지 작업하는 창을 막기 위함 (verify_facility_access 와 동일 정책).
+    """
+    from app.models.models import User
+
+    user = await db.get(User, current_user.get("user_id"))
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="계정이 비활성화되었거나 존재하지 않습니다.",
+        )
+    if not user.is_operator:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="운영자 권한이 필요합니다.",
+        )
+    return current_user

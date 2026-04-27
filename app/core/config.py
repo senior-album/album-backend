@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     COOLSMS_API_SECRET: str = ""
     COOLSMS_FROM_NUMBER: str = ""
 
+    # T-020: 운영자 부트스트랩. 앱 시작 시 이 이메일을 가진 활성 유저가 있으면
+    # is_operator=True 로 promote. 빈 값이면 부트스트랩 스킵 (이미 promote 된 유저가
+    # 있다고 가정). 콤마 구분 다중 이메일도 지원 — 예: "a@x,b@x".
+    OPERATOR_EMAIL: str = ""
+
     # CORS
     ALLOWED_ORIGINS: list = [
         "http://localhost:3000",

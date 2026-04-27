@@ -16,12 +16,35 @@ from app.core.config import get_settings
 from app.core.database import Database
 from app.core.logging_config import configure_logging
 from app.core.redis import get_redis, close_redis
-from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp, consents
+from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp, consents, legal
 
 configure_logging()
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
+
+
+async def _bootstrap_operators(operator_emails: str) -> None:
+    """OPERATOR_EMAIL (콤마 구분) 매칭 활성 유저를 is_operator=True 로 promote."""
+    from sqlalchemy import select
+    from app.models.models import User
+
+    emails = [e.strip().lower() for e in operator_emails.split(",") if e.strip()]
+    if not emails:
+        return
+
+    async with Database.session_scope() as session:
+        rows = (
+            await session.execute(select(User).where(User.email.in_(emails)))
+        ).scalars().all()
+        promoted = 0
+        for u in rows:
+            if not u.is_operator:
+                u.is_operator = True
+                promoted += 1
+        if promoted:
+            await session.commit()
+            logger.info(f"Promoted {promoted} user(s) to operator")
 
 
 @asynccontextmanager
@@ -41,6 +64,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         raise
+
+    # T-020 운영자 부트스트랩 — OPERATOR_EMAIL 매칭 유저를 is_operator=True 로 promote.
+    # 운영자가 이미 가입돼 있을 때만 효력. 빈 env / 매칭 없음 / 이미 운영자 모두 silent skip.
+    try:
+        if settings.OPERATOR_EMAIL:
+            await _bootstrap_operators(settings.OPERATOR_EMAIL)
+    except Exception as e:
+        logger.warning(f"Operator bootstrap failed (continuing): {e}")
 
     # Redis 연결
     try:
@@ -177,6 +208,7 @@ app.include_router(invitations.router)
 app.include_router(kakao_auth.router)
 app.include_router(phone_otp.router)
 app.include_router(consents.router)
+app.include_router(legal.router)
 
 
 # 로컬 업로드 디렉토리 정적 파일 서빙
