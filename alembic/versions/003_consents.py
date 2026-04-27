@@ -55,10 +55,10 @@ def upgrade() -> None:
         sa.Column("version", sa.String(20), nullable=False),
         sa.Column("title", sa.String(200), nullable=False),
         sa.Column("content", sa.Text, nullable=False),
-        sa.Column("is_mandatory", sa.Boolean, nullable=False, server_default=sa.true()),
+        sa.Column("is_mandatory", sa.Boolean, nullable=False),
         sa.Column("effective_from", sa.DateTime, nullable=False),
         sa.Column("effective_until", sa.DateTime, nullable=True),
-        sa.Column("created_at", sa.DateTime, nullable=False, server_default=sa.func.now()),
+        sa.Column("created_at", sa.DateTime, nullable=False),
         sa.UniqueConstraint("type", "version", name="uq_consent_documents_type_version"),
     )
     op.create_index(
