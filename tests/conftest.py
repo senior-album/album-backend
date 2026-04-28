@@ -8,14 +8,19 @@ import 한다. 모듈 로드 시 끌어오면 순수 단위 테스트(예: test_
 """
 
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import StaticPool
 
 from app.models.models import Base
 
 
 @pytest.fixture
 async def test_db():
-    """테스트 데이터베이스 세션"""
+    """테스트 데이터베이스 세션 (legacy fixture — 신규 테스트는 integration_db 권장)"""
     from app.main import app
     from app.core.database import get_db
 
@@ -33,14 +38,81 @@ async def test_db():
 
     app.dependency_overrides[get_db] = override_get_db
 
-    yield TestingSessionLocal
+    try:
+        yield TestingSessionLocal
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        await engine.dispose()
 
-    await engine.dispose()
+
+# ---------------------------------------------------------------------------
+# 통합 테스트 인프라 (T-124 PR A)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def integration_db():
+    """
+    인메모리 SQLite + `Database.get_db` dependency override.
+
+    `StaticPool` 로 모든 connection 이 같은 in-memory DB 를 공유하게 한다 —
+    그래야 route handler 가 만든 데이터를 테스트 코드 세션에서도 볼 수 있다
+    (sqlite `:memory:` 는 connection 마다 별도 DB 라 StaticPool 없으면 격리됨).
+
+    yields: `(SessionLocal, async_session)` 튜플.
+      - SessionLocal: 테스트가 추가 세션을 열고 싶을 때
+      - async_session: seed/assert 용으로 즉시 쓸 수 있는 한 개 세션
+
+    `app.main` 의 lifespan 은 거치지 않으므로 `Database._session_local` 은 여전히
+    None — 하지만 dep_override 가 `get_db` 를 가로채기에 endpoint 는 정상 동작.
+    """
+    from app.core.database import get_db
+    from app.main import app
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _override():
+        async with SessionLocal() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override
+    try:
+        async with SessionLocal() as session:
+            yield SessionLocal, session
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        await engine.dispose()
+
+
+@pytest.fixture
+async def integration_client(integration_db):
+    """
+    httpx.AsyncClient + ASGITransport 로 FastAPI 앱에 직접 ASGI 호출.
+
+    실제 lifespan / Redis / OpenSearch / MinIO 는 거치지 않는다 — 호출자가
+    필요하면 monkeypatch 로 추가 stub. `integration_db` 가 자동으로 의존성
+    먼저 set 되어 endpoint 의 `get_db` 가 동작.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
 @pytest.fixture
 def client():
-    """테스트 클라이언트"""
+    """동기 TestClient (legacy 호환). 신규 테스트는 integration_client 권장."""
     from fastapi.testclient import TestClient
 
     from app.main import app

@@ -1,48 +1,34 @@
 """
-인증 API 테스트
+인증 API 통합 테스트 (스모크 — endpoint 가 dep 풀고 validation 까지 도달하는지).
+
+T-124: integration_client fixture 로 lifespan 우회. 풀 통합 테스트
+(register → login → refresh → logout 플로우) 는 다음 PR 에서 빌드.
 """
 
 import pytest
-from fastapi.testclient import TestClient
-
-from app.main import app
-
-# T-124: TestClient 가 lifespan 을 트리거하지 않아 `Database.initialize()` 가 호출되지
-# 않은 상태에서 엔드포인트가 `get_db` 를 풀게 되어 RuntimeError 가 난다. 단위
-# 테스트 의도가 아니라 pre-existing 빈 통합 테스트라, 적절한 DB dependency
-# override fixture 가 추가될 때까지 module 레벨 skip. 후속 PR (T-124 통합 테스트)
-# 에서 제대로 작성 예정.
-pytestmark = pytest.mark.skip(reason="pre-existing: needs DB dep override; rewrite in T-124 integration round")
 
 
-@pytest.fixture
-def client():
-    """테스트 클라이언트"""
-    return TestClient(app)
+@pytest.mark.asyncio
+async def test_register_guardian_rejects_empty_body(integration_client):
+    """body 누락 시 pydantic 422."""
+    resp = await integration_client.post("/auth/register/guardian", json={})
+    assert resp.status_code == 422
 
 
-def test_register_guardian(client):
-    """보호자 회원가입 테스트"""
-    response = client.post(
+@pytest.mark.asyncio
+async def test_register_guardian_requires_password(integration_client):
+    """password 누락 시 pydantic 422 — 필수 필드 검증이 dep_override 환경에서도 동작."""
+    resp = await integration_client.post(
         "/auth/register/guardian",
-        json={
-            "email": "guardian@example.com",
-            "name": "Park Guardian",
-            "phone": "010-1234-5678",
-        },
+        json={"email": "g@example.com", "name": "Guardian"},
     )
-
-    # 환경 미설정으로 인한 실패 가능성 고려
-    if response.status_code == 200:
-        data = response.json()
-        assert data["email"] == "guardian@example.com"
-        assert data["name"] == "Park Guardian"
-        assert data["role"] == "guardian"
+    assert resp.status_code == 422
+    body = resp.json()
+    assert any("password" in str(err.get("loc", [])) for err in body.get("detail", []))
 
 
-def test_get_me_requires_auth(client):
-    """인증 필요 테스트"""
-    response = client.get("/auth/me")
-
-    # 토큰 없이 접근하면 401 반환
-    assert response.status_code == 403 or response.status_code == 401
+@pytest.mark.asyncio
+async def test_get_me_requires_auth(integration_client):
+    """토큰 없이 /auth/me 접근 → 401/403."""
+    resp = await integration_client.get("/auth/me")
+    assert resp.status_code in (401, 403)
