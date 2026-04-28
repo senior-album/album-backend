@@ -63,3 +63,54 @@ jobs:
         # `alembic check` 는 target_metadata 와 현재 DB 를 비교해 diff 가 없어야
         # pass. 모델을 바꾸고 revision 을 안 만든 PR 은 여기서 실패한다.
         run: alembic check
+
+  # T-124: 단위 테스트가 PR 머지 게이트로 동작하도록. 인메모리 SQLite 만 쓰기에
+  # postgres service 는 불필요.
+  pytest:
+    runs-on: ubuntu-latest
+
+    env:
+      # Settings 가 필수로 요구하는 env — CI 전용 더미 값
+      JWT_SECRET: ci-dummy-secret
+      JWT_REFRESH_SECRET: ci-dummy-refresh-secret
+      RESIDENT_PII_KEK: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      RESIDENT_NAME_HMAC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install libmagic
+        # python-magic 은 libmagic 시스템 라이브러리 필요. python-magic-bin 은
+        # Windows 전용이라 Linux 에선 별도 설치 (requirements 의 sys_platform
+        # 마커 참고).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmagic1
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest-cov==7.1.0
+
+      - name: Run pytest with coverage
+        # T-124 핵심 영역만 --cov 로 강조 — 나머지 모듈은 여전히 측정되지만
+        # term 리포트의 시그널을 분명히 한다. 향후 통합 테스트 라운드에서
+        # `app.api.photos` / `app.api.auth` 도 추가 예정.
+        run: |
+          pytest tests/ \
+            --cov=app.core.security \
+            --cov=app.core.storage \
+            --cov=app.services.face_recognition \
+            --cov=app.services.opensearch_service \
+            --cov=app.services.photo_worker \
+            --cov-report=term \
+            --cov-fail-under=70 \
+            -v
