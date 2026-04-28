@@ -96,15 +96,13 @@ def test_validate_upload_rejects_no_extension():
     assert exc.value.status_code == 415
 
 
-def test_validate_upload_rejects_extension_mime_mismatch():
-    """파일명은 .jpg 인데 실제 magic bytes 가 PNG → 415 (확장자 통과 후 MIME 단계)."""
+def test_validate_upload_allows_extension_mime_mismatch_within_whitelist():
+    """파일명은 .jpg 인데 실제 magic bytes 가 PNG — 둘 다 화이트리스트라 현재 명세는
+    통과시킨다. 향후 strict 매칭으로 바꾸면 이 테스트가 회귀 알람."""
     png_data = _make_png_bytes()
-    with pytest.raises(HTTPException) as exc:
-        _validate_upload("photo.jpg", png_data)
-    # ext 화이트리스트는 통과하지만 sniffed mime (image/png) 도 ALLOWED_MIME 에
-    # 있으므로 이 케이스는 실제로는 통과해야 한다 — 검증 순서 명세 확인.
-    # 결과는 통과 — 즉 이 호출이 raise 하지 않는다.
-    pytest.skip("ext/mime 가 모두 화이트리스트면 mismatch 라도 통과 — 명세 그대로")
+    ext, mime = _validate_upload("photo.jpg", png_data)
+    assert ext == ".jpg"  # 사용자가 선언한 확장자 그대로 반환
+    assert mime == "image/png"  # 실제 sniff 한 MIME
 
 
 def test_validate_upload_rejects_non_image_payload_with_image_extension():

@@ -13,7 +13,7 @@ def mock_db():
     """DB 초기화를 mock 처리"""
     with patch("app.core.database.Database.initialize", new_callable=AsyncMock) as mock_init, \
          patch("app.core.database.Database.close", new_callable=AsyncMock) as mock_close, \
-         patch("app.services.face_recognition.FaceRecognitionService") as mock_face:
+         patch("app.services.face_recognition.FaceService") as mock_face:
         yield
 
 
