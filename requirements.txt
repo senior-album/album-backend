@@ -23,6 +23,9 @@ python-magic==0.4.27
 python-magic-bin==0.4.14; sys_platform == 'win32'
 pytest==8.2.0
 pytest-asyncio==0.26.0
+# T-124: 인메모리 DB 단위 테스트 — 테스트 모듈이 sqlite+aiosqlite:///:memory: 드라이버를
+# 사용한다. 안 깔리면 절반 이상의 테스트가 ImportError 로 무너진다.
+aiosqlite==0.20.0
 insightface
 
 # T-032: 보호자 초대 QR 포스터 PDF 생성.
