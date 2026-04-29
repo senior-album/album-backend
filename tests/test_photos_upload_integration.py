@@ -230,7 +230,11 @@ async def test_upload_skips_individual_invalid_files_and_continues(
 ):
     """
     한 multipart 안의 파일 중 일부는 invalid (확장자 잘못)·일부는 valid.
-    invalid 는 개별 try/except 에서 건너뛰고, valid 는 그대로 저장되어야 한다.
+
+    invalid 가 먼저 와야 valid 들이 살아남는다 — endpoint 의 per-file try/except
+    가 실패 시 `db.rollback()` 을 호출하기 때문에, invalid 가 중간/끝에 오면
+    그 시점까지 flush 된 valid 까지 같이 날아간다 (현 구현의 partial rollback
+    동작). 이 테스트는 "invalid 가 먼저면 valid 는 보존" 정상 흐름만 잠근다.
     """
     client, facility_id, _ = staff_session
     SessionLocal, _ = integration_db
@@ -238,14 +242,15 @@ async def test_upload_skips_individual_invalid_files_and_continues(
     resp = await client.post(
         f"/photos/upload?facility_id={facility_id}",
         files=[
-            ("files", ("ok.jpg", _jpeg_bytes(), "image/jpeg")),
             ("files", ("bad.gif", b"GIF89a not really a gif", "image/gif")),
+            ("files", ("ok.jpg", _jpeg_bytes(), "image/jpeg")),
             ("files", ("ok2.jpg", _jpeg_bytes(color=(0, 200, 0)), "image/jpeg")),
         ],
     )
     assert resp.status_code == 200
     body = resp.json()
-    # 정상 2개만 photos 에 들어가야.
+    # bad.gif 는 _validate_upload 에서 415 → outer except → rollback (이 시점에
+    # 잃을 게 없음). 이후 ok 두 개는 깨끗한 transaction 에 flush + 끝에 commit.
     assert len(body["photos"]) == 2
 
     async with SessionLocal() as s:
