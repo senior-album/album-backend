@@ -3,6 +3,7 @@ MinIO (S3-compatible) object storage service.
 Uses boto3 which is already a dependency.
 """
 
+import asyncio
 import re
 import uuid
 import logging
@@ -131,13 +132,18 @@ class StorageService:
 
         T-100: `facility_id` 는 object key prefix 로 직접 들어가므로 path
         traversal 방어를 위해 sanitize. 동일하게 filename 확장자도 제한.
+
+        boto3 client.put_object 는 sync — 함수가 async 로 선언돼 있어도 호출
+        시점에 event loop 를 막아 동시 업로드가 직렬화됨. asyncio.to_thread 로
+        래핑해 진짜 동시 실행 가능하게 함 (T-030 후속 perf 개선).
         """
         raw_ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
         safe_prefix = _sanitize_object_prefix(facility_id)
         safe_ext = _sanitize_extension(raw_ext)
         object_key = f"{safe_prefix}/{uuid.uuid4().hex}.{safe_ext}"
 
-        self.client.put_object(
+        await asyncio.to_thread(
+            self.client.put_object,
             Bucket=self.bucket,
             Key=object_key,
             Body=BytesIO(file_data),

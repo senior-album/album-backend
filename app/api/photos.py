@@ -3,6 +3,7 @@
 업로드 시 얼굴 감지 → OpenSearch kNN 검색 → 자동 분류
 """
 
+import asyncio
 import os
 import uuid
 import secrets
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.images import reencode_strip_metadata
+from app.core.images import reencode_strip_metadata, reencode_with_thumbnail
 from app.core.redis import check_rate_limit
 from app.core.security import (
     get_current_user,
@@ -238,6 +239,65 @@ async def _enrich_photos_with_residents(
     return responses
 
 
+async def _upload_one_to_storage(
+    file: UploadFile,
+    storage,
+    facility_id: str,
+) -> dict:
+    """
+    사진 1장의 storage 측 처리 (DB 무관 부분).
+
+    asyncio.gather 로 N 장이 동시에 실행됨. 무거운 작업 분리:
+    - PIL 디코딩/재인코딩/섬네일 → asyncio.to_thread (CPU bound, GIL release)
+    - MinIO 원본/섬네일 업로드 → asyncio.gather (I/O bound, 동시 실행)
+
+    Returns: {original_filename, object_key, thumb_key}.
+    Raises: 검증 실패 / 인코딩 실패 / 업로드 실패 시 예외 — gather 호출자가
+    return_exceptions=True 로 받아 개별 실패만 스킵.
+    """
+    file_data = await file.read()
+
+    ext, sniffed_mime = _validate_upload(file.filename or "", file_data)
+    original_filename = file.filename or f"photo{ext}"
+
+    # PIL decode 1회로 reencode + 섬네일 (T-051 EXIF strip 동일 보장).
+    sanitized_data, sanitized_ext, sanitized_mime, thumb_data = await asyncio.to_thread(
+        reencode_with_thumbnail, file_data
+    )
+
+    base_name = os.path.splitext(original_filename)[0] or "photo"
+    filename = f"{base_name}.{sanitized_ext}"
+
+    # 원본 + 섬네일 동시 업로드. 섬네일이 None 이면 원본 키 fallback.
+    upload_tasks = [
+        storage.upload_file(
+            file_data=sanitized_data,
+            filename=filename,
+            content_type=sanitized_mime,
+            facility_id=facility_id,
+        )
+    ]
+    if thumb_data is not None:
+        upload_tasks.append(
+            storage.upload_file(
+                file_data=thumb_data,
+                filename=f"thumb_{filename}",
+                content_type=sanitized_mime,
+                facility_id=f"{facility_id}/thumbnails",
+            )
+        )
+
+    keys = await asyncio.gather(*upload_tasks)
+    object_key = keys[0]
+    thumb_key = keys[1] if len(keys) > 1 else object_key
+
+    return {
+        "original_filename": original_filename,
+        "object_key": object_key,
+        "thumb_key": thumb_key,
+    }
+
+
 @router.post("/upload")
 async def upload_photos(
     facility_id: str,
@@ -247,8 +307,8 @@ async def upload_photos(
 ):
     """
     다중 사진 업로드 (비동기 처리)
-    1. MinIO에 원본 + 섬네일 저장
-    2. DB에 사진 레코드 + 처리 작업(job) 생성
+    1. MinIO에 원본 + 섬네일 저장 (사진별 + 원본/섬네일 모두 동시 실행)
+    2. DB에 사진 레코드 + 처리 작업(job) 생성 (storage 작업 끝난 후 직렬)
     3. 실제 얼굴 감지/분류는 백그라운드 워커가 처리
     """
     # Rate limit: 사용자당 100회/분 (멀티 업로드 버스트 허용)
@@ -271,94 +331,56 @@ async def upload_photos(
     # T-106: pending 큐가 가득 차면 업로드 자체를 거절 — 백로그로 인한 DoS 완화.
     await _enforce_photo_queue_capacity(db, facility_id, len(files))
 
-    uploaded_photos = []
-    created_jobs = []
     storage = get_storage()
 
-    for file in files:
-        try:
-            file_data = await file.read()
+    # 1) Storage 측 작업을 사진별 동시 실행. return_exceptions=True 로 일부 실패도 나머지 계속.
+    storage_results = await asyncio.gather(
+        *[_upload_one_to_storage(f, storage, facility_id) for f in files],
+        return_exceptions=True,
+    )
 
-            # 업로드 검증 (크기/확장자/MIME/디코딩)
-            ext, sniffed_mime = _validate_upload(file.filename or "", file_data)
-            original_filename = file.filename or f"photo{ext}"
+    # 2) DB 쓰기는 단일 세션을 공유하므로 직렬. storage 작업이 모두 끝난 뒤에만 진행.
+    uploaded_photos: list[Photo] = []
+    created_jobs: list[PhotoProcessingJob] = []
 
-            # T-051 재인코딩 + EXIF/메타데이터 strip — 저장 전에 원본도 정화
-            sanitized_data, sanitized_ext, sanitized_mime = reencode_strip_metadata(file_data)
-            base_name = os.path.splitext(original_filename)[0] or "photo"
-            filename = f"{base_name}.{sanitized_ext}"
-
-            # 1) MinIO에 (재인코딩된) 원본 업로드 → object key만 저장
-            object_key = await storage.upload_file(
-                file_data=sanitized_data,
-                filename=filename,
-                content_type=sanitized_mime,
-                facility_id=facility_id,
-            )
-
-            # 2) 섬네일 생성 및 업로드 → object key만 저장
-            thumb_key = object_key  # 섬네일 실패 시 원본 키 사용
-            try:
-                img = PILImage.open(BytesIO(sanitized_data)).convert("RGB")
-                img_thumb = img.copy()
-                img_thumb.thumbnail((300, 300))
-                thumb_buf = BytesIO()
-                img_thumb.save(thumb_buf, format="JPEG", quality=80)
-                thumb_data = thumb_buf.getvalue()
-
-                thumb_key = await storage.upload_file(
-                    file_data=thumb_data,
-                    filename=f"thumb_{filename}",
-                    content_type="image/jpeg",
-                    facility_id=f"{facility_id}/thumbnails",
-                )
-            except Exception as e:
-                logger.warning(f"Thumbnail generation failed: {e}")
-
-            # 3) DB에 사진 레코드 저장 (object key만 저장)
-            photo = Photo(
-                id=str(uuid.uuid4()),
-                facility_id=facility_id,
-                original_url=object_key,
-                thumbnail_url=thumb_key,
-                is_processed=False,
-                processing_status="queued",
-                upload_source="api",
-                uploaded_by=current_user["user_id"],
-            )
-            db.add(photo)
-            await db.flush()
-
-            # 4) 처리 작업(Job) 생성 (테이블 없으면 skip)
-            try:
-                job = PhotoProcessingJob(
-                    id=str(uuid.uuid4()),
-                    photo_id=photo.id,
-                    facility_id=facility_id,
-                    status="pending",
-                )
-                db.add(job)
-                await db.flush()
-                created_jobs.append(job)
-                logger.info(f"Photo queued for processing: {photo.id} (job: {job.id})")
-            except Exception as job_err:
-                logger.warning(f"Job creation failed (will process inline): {job_err}")
-                # Job 테이블이 없으면 즉시 동기 처리 시도
-                await db.rollback()
-                # 사진만 다시 저장
-                db.add(photo)
-                await db.flush()
-
-            uploaded_photos.append(photo)
-
-        except Exception as e:
-            logger.error(f"Photo upload failed for {file.filename}: {e}", exc_info=True)
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-            # 개별 사진 실패는 건너뛰고 나머지 계속 처리
+    for file, result in zip(files, storage_results):
+        if isinstance(result, BaseException):
+            logger.error(f"Photo upload failed for {file.filename}: {result}", exc_info=result)
             continue
+
+        photo = Photo(
+            id=str(uuid.uuid4()),
+            facility_id=facility_id,
+            original_url=result["object_key"],
+            thumbnail_url=result["thumb_key"],
+            is_processed=False,
+            processing_status="queued",
+            upload_source="api",
+            uploaded_by=current_user["user_id"],
+        )
+        db.add(photo)
+        uploaded_photos.append(photo)
+
+        # 처리 작업(Job) 생성. 테이블이 없는 운영 환경 대비 try/except.
+        try:
+            job = PhotoProcessingJob(
+                id=str(uuid.uuid4()),
+                photo_id=photo.id,
+                facility_id=facility_id,
+                status="pending",
+            )
+            db.add(job)
+            created_jobs.append(job)
+        except Exception as job_err:
+            logger.warning(f"Job creation skipped (table missing?): {job_err}")
+
+    if not uploaded_photos:
+        # 모든 사진이 storage 단계에서 실패한 경우.
+        return {
+            "message": "0장의 사진이 업로드되었습니다. 모두 실패.",
+            "photos": [],
+            "jobs": [],
+        }
 
     try:
         await db.commit()
@@ -366,6 +388,9 @@ async def upload_photos(
         logger.error(f"Commit failed: {commit_err}", exc_info=True)
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"사진 저장 실패: {str(commit_err)}")
+
+    for photo in uploaded_photos:
+        logger.info(f"Photo queued for processing: {photo.id}")
 
     return {
         "message": f"{len(uploaded_photos)}장의 사진이 업로드되었습니다. 분류 처리 중...",
