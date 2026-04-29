@@ -175,13 +175,20 @@ app.add_middleware(
 # 예외 처리기
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
-    """HTTP 예외 처리"""
+    """HTTP 예외 처리.
+
+    `exc.headers` 도 함께 forward — 429 의 `Retry-After`, 401 의
+    `WWW-Authenticate` 등 의미 있는 헤더가 클라에 도달해야 한다 (T-124 PR5
+    integration test 가 발견한 회귀: handler 가 status+detail 만 복사하고
+    headers 를 누락해서 운영에서도 Retry-After 가 빠져나가지 않았음).
+    """
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "detail": exc.detail,
             "status_code": exc.status_code,
         },
+        headers=getattr(exc, "headers", None),
     )
 
 
