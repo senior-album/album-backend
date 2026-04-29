@@ -80,8 +80,17 @@ async def integration_db():
     SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async def _override():
+        # `Database.get_session` 의 동작을 그대로 흉내내야 한다 — 일부 route 는
+        # 명시적 `db.commit()` 을 안 하고 wrapper 의 yield-후-commit 에 의존
+        # (예: register_admin). auto-commit 안 하면 테스트 코드 세션이 빈 DB 만
+        # 보게 돼서 "0 rows" 실패.
         async with SessionLocal() as session:
-            yield session
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
     app.dependency_overrides[get_db] = _override
     try:
@@ -100,13 +109,18 @@ async def integration_client(integration_db):
     실제 lifespan / Redis / OpenSearch / MinIO 는 거치지 않는다 — 호출자가
     필요하면 monkeypatch 로 추가 stub. `integration_db` 가 자동으로 의존성
     먼저 set 되어 endpoint 의 `get_db` 가 동작.
+
+    base_url 을 `https://` 로 둬야 한다 — `set_auth_cookie` 가 prod 환경
+    (`DEBUG=False`) 에선 `Secure` 플래그를 박아 발급하는데, http 로 받으면
+    httpx 가 다음 요청에 그 쿠키를 안 보내서 모든 후속 호출이 401. ASGITransport
+    는 실제 TLS 를 안 하지만 scheme 만 https 면 쿠키 jar 가 정상 동작.
     """
     from httpx import ASGITransport, AsyncClient
 
     from app.main import app
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="https://test") as client:
         yield client
 
 
