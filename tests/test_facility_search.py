@@ -1,43 +1,40 @@
 """
 /facilities/search 엔드포인트 테스트
+
+T-124: integration_client fixture 로 lifespan 우회 + DB dep override.
+회원가입 전 시설 피커용이라 인증 불필요.
 """
 
 import pytest
-from fastapi.testclient import TestClient
-
-from app.main import app
-
-# T-124: TestClient 가 lifespan 을 통하지 않아 Database.initialize() 가 호출 안 되고,
-# 엔드포인트의 `get_db` 의존성에서 RuntimeError 가 난다. DB dep override fixture
-# 또는 with TestClient(app) as ... 패턴으로 재작성 필요. 후속 PR 에서 수정.
-pytestmark = pytest.mark.skip(reason="pre-existing: TestClient lifespan/DB init; rewrite in T-124 integration round")
 
 
-@pytest.fixture
-def client():
-    return TestClient(app)
-
-
-def test_search_requires_min_query_length(client):
+@pytest.mark.asyncio
+async def test_search_requires_min_query_length(integration_client):
     """q 파라미터가 2자 미만이면 422 반환 (pydantic Query 검증)"""
-    response = client.get("/facilities/search", params={"q": "a"})
-    assert response.status_code == 422
+    resp = await integration_client.get("/facilities/search", params={"q": "a"})
+    assert resp.status_code == 422
 
 
-def test_search_requires_q_param(client):
+@pytest.mark.asyncio
+async def test_search_requires_q_param(integration_client):
     """q 파라미터 누락 시 422 반환"""
-    response = client.get("/facilities/search")
-    assert response.status_code == 422
+    resp = await integration_client.get("/facilities/search")
+    assert resp.status_code == 422
 
 
-def test_search_is_unauthenticated(client):
-    """회원가입 전 단계에서 호출되므로 인증 없이 접근 가능해야 함"""
-    response = client.get("/facilities/search", params={"q": "행복"})
-    # DB 연결 실패로 500 날 수 있으나, 401/403 은 안 나야 함
-    assert response.status_code not in (401, 403)
+@pytest.mark.asyncio
+async def test_search_is_unauthenticated(integration_client):
+    """회원가입 전 단계에서 호출되므로 인증 없이 접근 가능해야 함."""
+    resp = await integration_client.get("/facilities/search", params={"q": "행복"})
+    # 빈 DB 라 결과는 [] 지만 200 으로 통과해야 한다.
+    assert resp.status_code == 200
+    assert resp.json() == []
 
 
-def test_search_limit_cap(client):
+@pytest.mark.asyncio
+async def test_search_limit_cap(integration_client):
     """limit 은 20 을 초과할 수 없음"""
-    response = client.get("/facilities/search", params={"q": "행복", "limit": 100})
-    assert response.status_code == 422
+    resp = await integration_client.get(
+        "/facilities/search", params={"q": "행복", "limit": 100}
+    )
+    assert resp.status_code == 422
