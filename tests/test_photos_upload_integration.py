@@ -80,7 +80,7 @@ async def staff_session(integration_client, integration_db):
     yields: (client, facility_id, user_id).
     """
     payload = {
-        "email": "admin@upload.test",
+        "email": "admin@upload.io",
         "password": "UploaderPass123!",
         "name": "Uploader",
         "phone": "010-9999-0000",
