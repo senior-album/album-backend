@@ -275,6 +275,10 @@ class AdminAuditLog(Base):
     # invitation_create     : 보호자 초대 발송
     # resident_update       : 입소자 정보 수정 (이름/의료 메모 등 PII)
     # resident_face_delete  : 등록된 기준 사진(임베딩) 삭제
+    # user_set_active       : 운영자가 다른 유저 활성/비활성 토글 (T-144)
+    # user_set_admin        : 운영자가 다른 유저 시설관리자 권한 토글 (T-144)
+    # user_set_operator     : 운영자가 다른 유저 운영자 권한 토글 (T-144)
+    # user_set_facility     : 운영자가 유저의 소속 시설 변경 (T-144)
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     action = Column(String(50), nullable=False, index=True)
     performed_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)

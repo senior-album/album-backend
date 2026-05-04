@@ -16,7 +16,7 @@ from app.core.config import get_settings
 from app.core.database import Database
 from app.core.logging_config import configure_logging
 from app.core.redis import get_redis, close_redis
-from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp, consents, legal
+from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp, consents, legal, admin
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -216,6 +216,7 @@ app.include_router(kakao_auth.router)
 app.include_router(phone_otp.router)
 app.include_router(consents.router)
 app.include_router(legal.router)
+app.include_router(admin.router)
 
 
 # 로컬 업로드 디렉토리 정적 파일 서빙
