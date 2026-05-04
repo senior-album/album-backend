@@ -11,6 +11,8 @@ T-144 / T-145 / T-146: 운영자(`is_operator`) 어드민 — 유저·시설·�
 - POST  /admin/facilities          — 시설 생성 (코드 자동 발급) (T-145)
 - PATCH /admin/facilities/{fac_id} — 시설 정보 수정 (코드 변경 불가) (T-145)
 - GET   /admin/guardians           — 보호자 요청 전체 시설 across 모니터링 (T-146)
+- GET   /admin/photo-jobs          — 사진 처리 큐 모니터링 (T-147)
+- POST  /admin/photo-jobs/{id}/retry — 실패한 작업 재큐 (T-147)
 
 설계:
 - hard delete 미지원. User/Facility 에는 입소자/사진/동의/감사 로그가 FK 로
@@ -39,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit import admin_audit
 from app.core.database import get_db
 from app.core.security import require_operator
-from app.models.models import Facility, Guardian, Photo, Resident, User
+from app.models.models import Facility, Guardian, Photo, PhotoProcessingJob, Resident, User
 
 logger = logging.getLogger(__name__)
 
@@ -596,3 +598,155 @@ async def list_guardians(
         for g, u, res, fac in rows
     ]
     return AdminGuardianListResponse(items=items, total=total, page=page, size=size)
+
+
+# ===========================================================================
+# T-147: 사진 처리 큐 모니터링
+# ===========================================================================
+
+
+class AdminPhotoJobOut(BaseModel):
+    id: str
+    photo_id: str
+    facility_id: str
+    facility_name: Optional[str] = None
+    status: str
+    error_message: Optional[str] = None
+    retry_count: int
+    max_retries: int
+    photo_processing_status: Optional[str] = None
+    photo_thumbnail_url: Optional[str] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class AdminPhotoJobListResponse(BaseModel):
+    items: list[AdminPhotoJobOut]
+    total: int
+    page: int
+    size: int
+
+
+@router.get("/photo-jobs", response_model=AdminPhotoJobListResponse)
+async def list_photo_jobs(
+    job_status: Optional[str] = Query(
+        None,
+        alias="status",
+        description="pending | processing | completed | failed",
+    ),
+    facility_id: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    _operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> AdminPhotoJobListResponse:
+    """PhotoProcessingJob 목록 — 큐 적체/실패 패턴 조감.
+
+    `status` (쿼리 파라미터) 는 FastAPI 키워드 충돌 회피로 alias 사용.
+    """
+    base = (
+        select(PhotoProcessingJob, Photo, Facility.name)
+        .outerjoin(Photo, PhotoProcessingJob.photo_id == Photo.id)
+        .outerjoin(Facility, PhotoProcessingJob.facility_id == Facility.id)
+    )
+    count_base = select(func.count(PhotoProcessingJob.id))
+
+    if job_status:
+        if job_status not in {"pending", "processing", "completed", "failed"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="status 는 pending|processing|completed|failed 중 하나여야 합니다.",
+            )
+        base = base.where(PhotoProcessingJob.status == job_status)
+        count_base = count_base.where(PhotoProcessingJob.status == job_status)
+
+    if facility_id is not None:
+        base = base.where(PhotoProcessingJob.facility_id == facility_id)
+        count_base = count_base.where(PhotoProcessingJob.facility_id == facility_id)
+
+    total = (await db.execute(count_base)).scalar_one()
+
+    base = base.order_by(PhotoProcessingJob.created_at.desc()).offset((page - 1) * size).limit(size)
+    rows = (await db.execute(base)).all()
+
+    items = [
+        AdminPhotoJobOut(
+            id=job.id,
+            photo_id=job.photo_id,
+            facility_id=job.facility_id,
+            facility_name=fname,
+            status=job.status,
+            error_message=job.error_message,
+            retry_count=job.retry_count,
+            max_retries=job.max_retries,
+            photo_processing_status=(photo.processing_status if photo else None),
+            photo_thumbnail_url=(photo.thumbnail_url if photo else None),
+            created_at=job.created_at,
+            started_at=job.started_at,
+            completed_at=job.completed_at,
+        )
+        for job, photo, fname in rows
+    ]
+    return AdminPhotoJobListResponse(items=items, total=total, page=page, size=size)
+
+
+class PhotoJobRetryResponse(BaseModel):
+    id: str
+    status: str
+    retry_count: int
+    error_message: Optional[str] = None
+
+
+@router.post("/photo-jobs/{job_id}/retry", response_model=PhotoJobRetryResponse)
+async def retry_photo_job(
+    job_id: str,
+    operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> PhotoJobRetryResponse:
+    """failed 상태 작업을 다시 pending 으로 돌려서 워커가 재처리하게 한다.
+
+    재처리 시점:
+    - error_message / completed_at / started_at 클리어
+    - retry_count 는 0 으로 리셋 — 운영자 개입한 fresh attempt 라 worker 의
+      자동 재시도 카운트와 분리. (이전 실패 이력은 audit log 에 남음)
+    - max_retries 는 그대로
+
+    failed 가 아닌 상태(processing/completed/pending) 는 409 — 운영자가 진행
+    중인 작업을 강제로 흔들지 않도록.
+    """
+    job = await db.get(PhotoProcessingJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾을 수 없습니다.")
+
+    if job.status != "failed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"failed 상태인 작업만 재시도할 수 있습니다. (현재: {job.status})",
+        )
+
+    prev_error = job.error_message
+    job.status = "pending"
+    job.error_message = None
+    job.started_at = None
+    job.completed_at = None
+    job.retry_count = 0
+
+    admin_audit(
+        db,
+        action="photo_job_retry",
+        performed_by=operator.get("user_id"),
+        target_type="photo_job",
+        target_id=job.id,
+        facility_id=job.facility_id,
+        detail=f"prev_error={prev_error[:200] if prev_error else ''}",
+    )
+    await db.commit()
+    await db.refresh(job)
+
+    return PhotoJobRetryResponse(
+        id=job.id,
+        status=job.status,
+        retry_count=job.retry_count,
+        error_message=job.error_message,
+    )

@@ -281,6 +281,7 @@ class AdminAuditLog(Base):
     # user_set_facility     : 운영자가 유저의 소속 시설 변경 (T-144)
     # facility_create       : 운영자가 신규 시설 생성 (T-145)
     # facility_update       : 운영자가 시설 정보(name/address/phone) 수정 (T-145)
+    # photo_job_retry       : 운영자가 실패한 사진 처리 작업 재큐 (T-147)
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     action = Column(String(50), nullable=False, index=True)
     performed_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
