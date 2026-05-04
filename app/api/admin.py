@@ -1,8 +1,8 @@
 """
-T-144 / T-145: 운영자(`is_operator`) 어드민 — 유저·시설 관리.
+T-144 / T-145 / T-146: 운영자(`is_operator`) 어드민 — 유저·시설·보호자 모니터링.
 
 기존 `/admin/legal-settings` 는 법무 KV/약관 본문 전용. 이 라우터는 운영자가
-플랫폼 전체 유저·시설을 가로질러 보고/조정하기 위함.
+플랫폼 전체 유저·시설·보호자 승인 흐름을 가로질러 보고/조정하기 위함.
 
 엔드포인트:
 - GET   /admin/users               — 유저 목록 + 필터/검색/페이지네이션 (T-144)
@@ -10,6 +10,7 @@ T-144 / T-145: 운영자(`is_operator`) 어드민 — 유저·시설 관리.
 - GET   /admin/facilities          — 시설 목록 + 직원/입소자/사진 수 (T-145)
 - POST  /admin/facilities          — 시설 생성 (코드 자동 발급) (T-145)
 - PATCH /admin/facilities/{fac_id} — 시설 정보 수정 (코드 변경 불가) (T-145)
+- GET   /admin/guardians           — 보호자 요청 전체 시설 across 모니터링 (T-146)
 
 설계:
 - hard delete 미지원. User/Facility 에는 입소자/사진/동의/감사 로그가 FK 로
@@ -38,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit import admin_audit
 from app.core.database import get_db
 from app.core.security import require_operator
-from app.models.models import Facility, Photo, Resident, User
+from app.models.models import Facility, Guardian, Photo, Resident, User
 
 logger = logging.getLogger(__name__)
 
@@ -491,3 +492,107 @@ async def patch_facility(
         photo_count=photo_cnt,
         created_at=fac.created_at,
     )
+
+
+# ===========================================================================
+# T-146: 보호자 승인 현황 (전체 시설 across)
+# ===========================================================================
+
+
+class AdminGuardianOut(BaseModel):
+    id: str
+    user_id: str
+    user_name: str
+    user_email: str
+    user_phone: Optional[str] = None
+    facility_id: Optional[str] = None
+    facility_name: Optional[str] = None
+    resident_id: Optional[str] = None
+    resident_name: Optional[str] = None
+    relationship_type: Optional[str] = None
+    request_message: Optional[str] = None
+    is_approved: bool
+    is_rejected: bool
+    reject_reason: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
+class AdminGuardianListResponse(BaseModel):
+    items: list[AdminGuardianOut]
+    total: int
+    page: int
+    size: int
+
+
+@router.get("/guardians", response_model=AdminGuardianListResponse)
+async def list_guardians(
+    facility_id: Optional[str] = Query(None),
+    state: Optional[str] = Query(None, description="pending | approved | rejected"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    _operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> AdminGuardianListResponse:
+    """보호자 요청 전체 시설 across 모니터링 — 운영자가 승인 적체/반려 패턴 조감.
+
+    상태(state) 필터:
+    - pending : is_approved=False AND is_rejected=False
+    - approved: is_approved=True
+    - rejected: is_rejected=True
+    """
+    base = (
+        select(Guardian, User, Resident, Facility)
+        .join(User, Guardian.user_id == User.id)
+        .outerjoin(Resident, Guardian.resident_id == Resident.id)
+        .outerjoin(Facility, Guardian.facility_id == Facility.id)
+    )
+    count_base = select(func.count(Guardian.id))
+
+    if facility_id is not None:
+        base = base.where(Guardian.facility_id == facility_id)
+        count_base = count_base.where(Guardian.facility_id == facility_id)
+
+    if state == "pending":
+        cond = (Guardian.is_approved == False) & (Guardian.is_rejected == False)
+        base = base.where(cond)
+        count_base = count_base.where(cond)
+    elif state == "approved":
+        base = base.where(Guardian.is_approved == True)
+        count_base = count_base.where(Guardian.is_approved == True)
+    elif state == "rejected":
+        base = base.where(Guardian.is_rejected == True)
+        count_base = count_base.where(Guardian.is_rejected == True)
+    elif state is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="state 는 pending | approved | rejected 중 하나여야 합니다.",
+        )
+
+    total = (await db.execute(count_base)).scalar_one()
+
+    base = base.order_by(Guardian.created_at.desc()).offset((page - 1) * size).limit(size)
+    rows = (await db.execute(base)).all()
+
+    items = [
+        AdminGuardianOut(
+            id=g.id,
+            user_id=g.user_id,
+            user_name=u.name,
+            user_email=u.email,
+            user_phone=u.phone,
+            facility_id=g.facility_id,
+            facility_name=fac.name if fac else None,
+            resident_id=g.resident_id,
+            resident_name=res.name if res else None,
+            relationship_type=g.relationship_type,
+            request_message=g.request_message,
+            is_approved=bool(g.is_approved),
+            is_rejected=bool(g.is_rejected),
+            reject_reason=g.reject_reason,
+            approved_at=g.approved_at,
+            created_at=g.created_at,
+        )
+        for g, u, res, fac in rows
+    ]
+    return AdminGuardianListResponse(items=items, total=total, page=page, size=size)
