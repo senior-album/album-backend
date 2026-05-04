@@ -1,40 +1,44 @@
 """
-T-144: 운영자(`is_operator`) 어드민 — 전체 유저 관리.
+T-144 / T-145: 운영자(`is_operator`) 어드민 — 유저·시설 관리.
 
 기존 `/admin/legal-settings` 는 법무 KV/약관 본문 전용. 이 라우터는 운영자가
-플랫폼 전체 유저를 가로질러 보고/조정하기 위함.
+플랫폼 전체 유저·시설을 가로질러 보고/조정하기 위함.
 
 엔드포인트:
-- GET /admin/users   — 목록 + 필터(role/facility_id/is_active) + 검색(이메일·이름) + 페이지네이션
-- PATCH /admin/users/{user_id} — `is_active`/`is_admin`/`is_operator`/`facility_id` 부분 업데이트
+- GET   /admin/users               — 유저 목록 + 필터/검색/페이지네이션 (T-144)
+- PATCH /admin/users/{user_id}     — 권한·활성·시설 부분 업데이트 (T-144)
+- GET   /admin/facilities          — 시설 목록 + 직원/입소자/사진 수 (T-145)
+- POST  /admin/facilities          — 시설 생성 (코드 자동 발급) (T-145)
+- PATCH /admin/facilities/{fac_id} — 시설 정보 수정 (코드 변경 불가) (T-145)
 
 설계:
-- hard delete 미지원. User 에는 입소자/사진/동의/감사 로그가 FK 로 매달려 있어
-  cascade 위험. 비활성화 토글로만 처리.
-- 모든 변경 — `admin_audit` 으로 AdminAuditLog 에 기록 (action 어휘:
-  `user_set_active`, `user_set_admin`, `user_set_operator`, `user_set_facility`).
-  변경된 필드 1개당 1 row — 사후 추적 시 어떤 권한이 언제 토글됐는지 분리해 보기 쉬움.
+- hard delete 미지원. User/Facility 에는 입소자/사진/동의/감사 로그가 FK 로
+  매달려 있어 cascade 위험. 비활성화 토글로만 처리 (시설은 별도 비활성 컬럼이
+  없어 일단 PATCH 미허용 — 필요 시 추후 `is_active` 컬럼 추가).
+- 모든 변경 — `admin_audit` 으로 AdminAuditLog 에 기록.
+  유저: `user_set_active|admin|operator|facility` (필드별 1 row)
+  시설: `facility_create`, `facility_update` (변경 필드 detail 에 통합 기록)
 - self-lockout 방지: 운영자가 자기 자신의 `is_operator` 를 False 로 끄거나
-  `is_active` 를 False 로 끄는 시도는 400. 두 명 이상 운영자 환경에서는
-  서로 강등 가능 — 단일 운영자 자해만 막음.
+  `is_active` 를 False 로 끄는 시도는 400.
 - `is_admin=True` 인데 `facility_id` 가 없으면 400. 시설장은 시설 소속이 필수.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import admin_audit
 from app.core.database import get_db
 from app.core.security import require_operator
-from app.models.models import Facility, User
+from app.models.models import Facility, Photo, Resident, User
 
 logger = logging.getLogger(__name__)
 
@@ -250,3 +254,240 @@ async def patch_user(
         facility_name = fac.name if fac else None
 
     return _user_to_admin_out(target, facility_name)
+
+
+# ===========================================================================
+# T-145: 시설 관리
+# ===========================================================================
+
+
+class AdminFacilityOut(BaseModel):
+    id: str
+    code: str
+    name: str
+    address: str
+    phone: str
+    staff_count: int
+    resident_count: int
+    photo_count: int
+    created_at: Optional[datetime] = None
+
+
+class AdminFacilityListResponse(BaseModel):
+    items: list[AdminFacilityOut]
+    total: int
+    page: int
+    size: int
+
+
+class AdminFacilityCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    address: str = Field(min_length=1, max_length=500)
+    phone: str = Field(default="", max_length=20)
+    code: Optional[str] = Field(default=None, max_length=20)
+
+
+class AdminFacilityPatch(BaseModel):
+    """name/address/phone 만 수정 가능. code 는 시설 식별자라 변경 금지."""
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    address: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    phone: Optional[str] = Field(default=None, max_length=20)
+
+
+def _generate_facility_code() -> str:
+    return f"FAC-{uuid.uuid4().hex[:6].upper()}"
+
+
+@router.get("/facilities", response_model=AdminFacilityListResponse)
+async def list_facilities(
+    q: Optional[str] = Query(None, description="이름/주소 부분 일치 (대소문자 무시)"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    _operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> AdminFacilityListResponse:
+    """시설 목록 + 직원/입소자/사진 수.
+
+    카운트는 시설별 별도 집계 쿼리로 묶어서 N+1 방지. launch target 규모(시설 1~수십)
+    에서는 한 번에 전부 끌어와도 충분.
+    """
+    base = select(Facility)
+    count_base = select(func.count(Facility.id))
+
+    if q:
+        like = f"%{q.lower()}%"
+        cond = or_(func.lower(Facility.name).like(like), func.lower(Facility.address).like(like))
+        base = base.where(cond)
+        count_base = count_base.where(cond)
+
+    total = (await db.execute(count_base)).scalar_one()
+
+    base = base.order_by(Facility.created_at.desc()).offset((page - 1) * size).limit(size)
+    facilities = list((await db.execute(base)).scalars().all())
+
+    facility_ids = [f.id for f in facilities]
+    counts: dict[str, dict[str, int]] = {fid: {"staff": 0, "resident": 0, "photo": 0} for fid in facility_ids}
+
+    if facility_ids:
+        # 직원 수 (시설 소속이면서 role=staff. 보호자는 facility_id 가 채워질 수 있어도 직원이 아님)
+        staff_rows = (
+            await db.execute(
+                select(User.facility_id, func.count(User.id))
+                .where(User.facility_id.in_(facility_ids), User.role == "staff")
+                .group_by(User.facility_id)
+            )
+        ).all()
+        for fid, cnt in staff_rows:
+            counts[fid]["staff"] = cnt
+
+        resident_rows = (
+            await db.execute(
+                select(Resident.facility_id, func.count(Resident.id))
+                .where(Resident.facility_id.in_(facility_ids), Resident.is_active == True)
+                .group_by(Resident.facility_id)
+            )
+        ).all()
+        for fid, cnt in resident_rows:
+            counts[fid]["resident"] = cnt
+
+        photo_rows = (
+            await db.execute(
+                select(Photo.facility_id, func.count(Photo.id))
+                .where(Photo.facility_id.in_(facility_ids))
+                .group_by(Photo.facility_id)
+            )
+        ).all()
+        for fid, cnt in photo_rows:
+            counts[fid]["photo"] = cnt
+
+    items = [
+        AdminFacilityOut(
+            id=f.id,
+            code=f.code,
+            name=f.name,
+            address=f.address,
+            phone=f.phone or "",
+            staff_count=counts.get(f.id, {}).get("staff", 0),
+            resident_count=counts.get(f.id, {}).get("resident", 0),
+            photo_count=counts.get(f.id, {}).get("photo", 0),
+            created_at=f.created_at,
+        )
+        for f in facilities
+    ]
+    return AdminFacilityListResponse(items=items, total=total, page=page, size=size)
+
+
+@router.post("/facilities", response_model=AdminFacilityOut, status_code=status.HTTP_201_CREATED)
+async def create_facility(
+    body: AdminFacilityCreate,
+    operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> AdminFacilityOut:
+    """신규 시설 생성. code 미지정 시 자동 발급. code 중복 시 409."""
+    code = (body.code or _generate_facility_code()).strip()
+    existing = (await db.execute(select(Facility).where(Facility.code == code))).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"시설 코드 '{code}' 가 이미 사용 중입니다.",
+        )
+
+    fac = Facility(
+        id=str(uuid.uuid4()),
+        code=code,
+        name=body.name.strip(),
+        address=body.address.strip(),
+        phone=(body.phone or "").strip(),
+    )
+    db.add(fac)
+
+    admin_audit(
+        db,
+        action="facility_create",
+        performed_by=operator.get("user_id"),
+        target_type="facility",
+        target_id=fac.id,
+        facility_id=fac.id,
+        detail=f"code={fac.code}, name={fac.name}",
+    )
+    await db.commit()
+    await db.refresh(fac)
+
+    return AdminFacilityOut(
+        id=fac.id,
+        code=fac.code,
+        name=fac.name,
+        address=fac.address,
+        phone=fac.phone or "",
+        staff_count=0,
+        resident_count=0,
+        photo_count=0,
+        created_at=fac.created_at,
+    )
+
+
+@router.patch("/facilities/{facility_id}", response_model=AdminFacilityOut)
+async def patch_facility(
+    facility_id: str,
+    body: AdminFacilityPatch,
+    operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> AdminFacilityOut:
+    """시설 정보(name/address/phone) 부분 업데이트. 변경 사항을 audit detail 에 통합 기록."""
+    fac = await db.get(Facility, facility_id)
+    if fac is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="시설을 찾을 수 없습니다.")
+
+    diffs: list[str] = []
+    if body.name is not None and body.name.strip() != fac.name:
+        diffs.append(f"name: {fac.name!r} -> {body.name.strip()!r}")
+        fac.name = body.name.strip()
+    if body.address is not None and body.address.strip() != fac.address:
+        diffs.append(f"address: {fac.address!r} -> {body.address.strip()!r}")
+        fac.address = body.address.strip()
+    if body.phone is not None and (body.phone or "").strip() != (fac.phone or ""):
+        diffs.append(f"phone: {fac.phone or ''!r} -> {(body.phone or '').strip()!r}")
+        fac.phone = (body.phone or "").strip()
+
+    if diffs:
+        admin_audit(
+            db,
+            action="facility_update",
+            performed_by=operator.get("user_id"),
+            target_type="facility",
+            target_id=fac.id,
+            facility_id=fac.id,
+            detail="; ".join(diffs),
+        )
+        await db.commit()
+        await db.refresh(fac)
+
+    # 카운트 재계산 (PATCH 응답에서도 일관 표시)
+    staff_cnt = (
+        await db.execute(
+            select(func.count(User.id)).where(User.facility_id == fac.id, User.role == "staff")
+        )
+    ).scalar_one()
+    resident_cnt = (
+        await db.execute(
+            select(func.count(Resident.id)).where(
+                Resident.facility_id == fac.id, Resident.is_active == True
+            )
+        )
+    ).scalar_one()
+    photo_cnt = (
+        await db.execute(select(func.count(Photo.id)).where(Photo.facility_id == fac.id))
+    ).scalar_one()
+
+    return AdminFacilityOut(
+        id=fac.id,
+        code=fac.code,
+        name=fac.name,
+        address=fac.address,
+        phone=fac.phone or "",
+        staff_count=staff_cnt,
+        resident_count=resident_cnt,
+        photo_count=photo_cnt,
+        created_at=fac.created_at,
+    )
