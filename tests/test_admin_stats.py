@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os as _os
+import platform as _platform
 import sys as _sys
 import types as _types
 
-if "magic" not in _sys.modules:
+# Windows 전용 stub — 자세한 배경은 test_admin_users.py 상단 주석.
+if _platform.system() == "Windows" and "magic" not in _sys.modules:
     _stub = _types.ModuleType("magic")
     _stub.from_buffer = lambda data, mime=False: "image/jpeg"  # type: ignore[attr-defined]
     _stub.from_file = lambda path, mime=False: "image/jpeg"  # type: ignore[attr-defined]
