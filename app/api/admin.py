@@ -13,6 +13,7 @@ T-144 / T-145 / T-146: 운영자(`is_operator`) 어드민 — 유저·시설·�
 - GET   /admin/guardians           — 보호자 요청 전체 시설 across 모니터링 (T-146)
 - GET   /admin/photo-jobs          — 사진 처리 큐 모니터링 (T-147)
 - POST  /admin/photo-jobs/{id}/retry — 실패한 작업 재큐 (T-147)
+- GET   /admin/stats               — 통계 대시보드 (유저·시설·사진·작업·보호자 + 7일 추세) (T-148)
 
 설계:
 - hard delete 미지원. User/Facility 에는 입소자/사진/동의/감사 로그가 FK 로
@@ -749,4 +750,150 @@ async def retry_photo_job(
         status=job.status,
         retry_count=job.retry_count,
         error_message=job.error_message,
+    )
+
+
+# ===========================================================================
+# T-148: 통계 대시보드
+# ===========================================================================
+
+
+class StatsCounts(BaseModel):
+    """단순 카운트 묶음 — pydantic 응답 키를 명확히 하기 위해 typed."""
+
+    total: int = 0
+    by: dict[str, int] = Field(default_factory=dict)
+
+
+class AdminStatsResponse(BaseModel):
+    users: StatsCounts            # total + by={"staff": N, "guardian": N, "operator": N, "active": N}
+    facilities: StatsCounts       # total
+    residents: StatsCounts        # total (is_active=True 만)
+    photos: StatsCounts           # total + by={"today": N, "processed": N, "public": N}
+    photo_jobs: StatsCounts       # total + by={status: N for each}
+    guardians: StatsCounts        # total + by={"pending": N, "approved": N, "rejected": N}
+    user_signups_7d: list[dict[str, int | str]]   # [{"date": "2026-04-28", "count": 3}, ...]
+    photo_uploads_7d: list[dict[str, int | str]]  # 같은 형태, 사진 기준
+
+
+@router.get("/stats", response_model=AdminStatsResponse)
+async def admin_stats(
+    _operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> AdminStatsResponse:
+    """전 플랫폼 카운트 + 최근 7일 가입/업로드 추세."""
+    from datetime import timedelta
+
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    seven_days_ago = today_start - timedelta(days=6)  # 오늘 포함 7일
+
+    # ---- users ----
+    user_total = (await db.execute(select(func.count(User.id)))).scalar_one()
+    user_active = (
+        await db.execute(select(func.count(User.id)).where(User.is_active == True))
+    ).scalar_one()
+    user_operators = (
+        await db.execute(select(func.count(User.id)).where(User.is_operator == True))
+    ).scalar_one()
+    role_rows = (
+        await db.execute(select(User.role, func.count(User.id)).group_by(User.role))
+    ).all()
+    role_counts = {r[0]: r[1] for r in role_rows}
+    users = StatsCounts(
+        total=user_total,
+        by={
+            "staff": role_counts.get("staff", 0),
+            "guardian": role_counts.get("guardian", 0),
+            "operator": user_operators,
+            "active": user_active,
+        },
+    )
+
+    # ---- facilities ----
+    fac_total = (await db.execute(select(func.count(Facility.id)))).scalar_one()
+    facilities = StatsCounts(total=fac_total)
+
+    # ---- residents (is_active 만) ----
+    res_total = (
+        await db.execute(select(func.count(Resident.id)).where(Resident.is_active == True))
+    ).scalar_one()
+    residents = StatsCounts(total=res_total)
+
+    # ---- photos ----
+    photo_total = (await db.execute(select(func.count(Photo.id)))).scalar_one()
+    photo_today = (
+        await db.execute(select(func.count(Photo.id)).where(Photo.created_at >= today_start))
+    ).scalar_one()
+    photo_processed = (
+        await db.execute(select(func.count(Photo.id)).where(Photo.is_processed == True))
+    ).scalar_one()
+    photo_public = (
+        await db.execute(select(func.count(Photo.id)).where(Photo.is_public == True))
+    ).scalar_one()
+    photos = StatsCounts(
+        total=photo_total,
+        by={"today": photo_today, "processed": photo_processed, "public": photo_public},
+    )
+
+    # ---- photo_jobs ----
+    job_rows = (
+        await db.execute(
+            select(PhotoProcessingJob.status, func.count(PhotoProcessingJob.id))
+            .group_by(PhotoProcessingJob.status)
+        )
+    ).all()
+    job_by = {r[0]: r[1] for r in job_rows}
+    photo_jobs = StatsCounts(total=sum(job_by.values()), by=job_by)
+
+    # ---- guardians ----
+    g_total = (await db.execute(select(func.count(Guardian.id)))).scalar_one()
+    g_pending = (
+        await db.execute(
+            select(func.count(Guardian.id)).where(
+                Guardian.is_approved == False, Guardian.is_rejected == False
+            )
+        )
+    ).scalar_one()
+    g_approved = (
+        await db.execute(select(func.count(Guardian.id)).where(Guardian.is_approved == True))
+    ).scalar_one()
+    g_rejected = (
+        await db.execute(select(func.count(Guardian.id)).where(Guardian.is_rejected == True))
+    ).scalar_one()
+    guardians = StatsCounts(
+        total=g_total,
+        by={"pending": g_pending, "approved": g_approved, "rejected": g_rejected},
+    )
+
+    # ---- 7일 추세: SQLite/PG 양쪽 호환 위해 Python 측에서 group ----
+    user_recent = (
+        await db.execute(select(User.created_at).where(User.created_at >= seven_days_ago))
+    ).scalars().all()
+    photo_recent = (
+        await db.execute(select(Photo.created_at).where(Photo.created_at >= seven_days_ago))
+    ).scalars().all()
+
+    def _bucket(rows: list[datetime]) -> list[dict[str, int | str]]:
+        buckets: dict[str, int] = {}
+        for i in range(7):
+            d = (today_start - timedelta(days=6 - i)).date().isoformat()
+            buckets[d] = 0
+        for ts in rows:
+            if ts is None:
+                continue
+            key = ts.date().isoformat()
+            if key in buckets:
+                buckets[key] += 1
+        return [{"date": k, "count": v} for k, v in buckets.items()]
+
+    return AdminStatsResponse(
+        users=users,
+        facilities=facilities,
+        residents=residents,
+        photos=photos,
+        photo_jobs=photo_jobs,
+        guardians=guardians,
+        user_signups_7d=_bucket(list(user_recent)),
+        photo_uploads_7d=_bucket(list(photo_recent)),
     )
