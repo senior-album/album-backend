@@ -13,13 +13,17 @@ from __future__ import annotations
 
 # CLAUDE.md 알려진 이슈: Windows 에서 libmagic 로딩 시 access violation 으로 segfault.
 # integration_client → app.main → photos.py → `import magic` 경로가 hang 을 유발.
-# 테스트 모듈 로드 시점에 stub 을 sys.modules 에 박아 실제 native 라이브러리 로드를 회피.
-# CI(Linux) 에선 정상 magic 이 로드되므로 영향 없음.
+# **Windows 에서만** stub 을 sys.modules 에 박아 실제 native 라이브러리 로드를 회피.
+# CI(Linux) 에서는 절대 stub 으로 가리면 안 된다 — 다른 테스트
+# (test_photos_validate_upload 등) 가 실제 magic.from_buffer 의 sniff 결과로
+# MIME 검증 분기를 검증하므로, hardcoded 'image/jpeg' stub 이 sys.modules 에
+# 남아있으면 그 테스트들이 모두 회귀.
 import os as _os
+import platform as _platform
 import sys as _sys
 import types as _types
 
-if "magic" not in _sys.modules:
+if _platform.system() == "Windows" and "magic" not in _sys.modules:
     _stub = _types.ModuleType("magic")
     _stub.from_buffer = lambda data, mime=False: "image/jpeg"  # type: ignore[attr-defined]
     _stub.from_file = lambda path, mime=False: "image/jpeg"  # type: ignore[attr-defined]
@@ -27,6 +31,7 @@ if "magic" not in _sys.modules:
 
 # Settings 가 import 시점에 .env 미설정 필드(JWT_REFRESH_SECRET 등) 를
 # 강제하므로 테스트 전용 더미 값 주입. 실제 secret 검증 로직은 별도 테스트 영역.
+# CI 는 자체 env 를 먼저 설정하므로 setdefault 가 no-op 로 처리됨.
 _os.environ.setdefault("JWT_SECRET", "test-secret-value-for-jwt-32-bytes-min")
 _os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret-32bytes-minimum")
 _os.environ.setdefault("RESIDENT_PII_KEK", "0" * 64)  # 32-byte hex
