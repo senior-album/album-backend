@@ -51,8 +51,10 @@ class User(Base):
     facility_id = Column(String(36), ForeignKey("facilities.id"), nullable=True)
     facility = relationship("Facility", back_populates="staff", foreign_keys=[facility_id])
 
-    phone = Column(String(20), nullable=True)
-    phone_verified_at = Column(DateTime, nullable=True)  # 최근 OTP 성공 시각 — 시설 연결 요청 게이트용
+    # OTP 인증 성공 시 갱신. UNIQUE — 한 번호는 한 계정에만 매핑 (사칭/오등록 방지).
+    # 재인증 정책: phone_verified_at 이 OTP_REVERIFY_AFTER_DAYS 경과 시 게이트가 재인증 요구.
+    phone = Column(String(20), unique=True, nullable=True)
+    phone_verified_at = Column(DateTime, nullable=True)
     push_token = Column(String(500), nullable=True)
     notification_enabled = Column(Boolean, default=True)
     notification_settings = Column(JSON, default={})
@@ -412,3 +414,20 @@ class RefreshToken(Base):
     ip_address = Column(String(45), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PhoneClaimReport(Base):
+    """
+    "이 번호 내가 등록 안 했는데?" 신고. 휴대폰 OTP 인증 시 dup 충돌 (HTTP 409) 을
+    경험한 사용자가 본인이 직접 신고. 운영자가 어드민에서 수동 검토 (별 PR).
+    """
+    __tablename__ = "phone_claim_reports"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    reporter_user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    claimed_phone = Column(String(20), nullable=False, index=True)
+    note = Column(Text, nullable=False, default="")
+    # pending | reviewed | resolved | rejected — 운영자 어드민에서 갱신
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

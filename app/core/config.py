@@ -108,7 +108,9 @@ class Settings(BaseSettings):
 
     # 전화번호 OTP
     OTP_TTL_SECONDS: int = 300  # 5분 유효
-    OTP_FRESH_WINDOW_SECONDS: int = 600  # 시설 연결 요청 게이트 — 인증 후 10분 이내
+    # 인증된 phone_verified_at 의 유효기간. 1년 지나면 시설 연결 등 게이트가 재인증 요구.
+    # 한 번 인증하면 끝낸다는 UX 정책 (사용자 결정) + 장기 신뢰 한도.
+    OTP_REVERIFY_AFTER_DAYS: int = 365
     OTP_MAX_VERIFY_ATTEMPTS: int = 5  # 한 코드당 검증 시도 횟수
     OTP_SEND_RATE_PER_PHONE_PER_HOUR: int = 5
     OTP_SEND_RATE_PER_PHONE_PER_MINUTE: int = 1
