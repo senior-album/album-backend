@@ -31,17 +31,37 @@ class OpenSearchService:
 
     @classmethod
     def get_client(cls) -> OpenSearch:
+        """싱글톤 클라이언트. T-004: TLS / basic auth 옵션 환경변수 주입."""
         if cls._client is None:
             settings = get_settings()
-            cls._client = OpenSearch(
-                hosts=[{
+            client_kwargs: dict = {
+                "hosts": [{
                     "host": settings.OPENSEARCH_HOST,
                     "port": settings.OPENSEARCH_PORT,
                 }],
-                use_ssl=False,
-                verify_certs=False,
+                "use_ssl": settings.OPENSEARCH_USE_SSL,
+                "verify_certs": settings.OPENSEARCH_VERIFY_CERTS,
+            }
+            # ssl_show_warn 은 verify_certs=False 일 때만 의미 — 자체 서명 cert 운영
+            # 환경에서 매 요청마다 InsecureRequestWarning 이 로그를 가득 채우는 걸 막음.
+            if settings.OPENSEARCH_USE_SSL and not settings.OPENSEARCH_VERIFY_CERTS:
+                client_kwargs["ssl_show_warn"] = False
+            if settings.OPENSEARCH_USE_SSL and settings.OPENSEARCH_CA_CERT_PATH:
+                client_kwargs["ca_certs"] = settings.OPENSEARCH_CA_CERT_PATH
+            if settings.OPENSEARCH_USER and settings.OPENSEARCH_PASSWORD:
+                client_kwargs["http_auth"] = (
+                    settings.OPENSEARCH_USER,
+                    settings.OPENSEARCH_PASSWORD,
+                )
+
+            cls._client = OpenSearch(**client_kwargs)
+            scheme = "https" if settings.OPENSEARCH_USE_SSL else "http"
+            auth_marker = "auth" if settings.OPENSEARCH_USER else "no-auth"
+            verify_marker = "verify" if settings.OPENSEARCH_VERIFY_CERTS else "no-verify"
+            logger.info(
+                f"OpenSearch connected: {scheme}://{settings.OPENSEARCH_HOST}:{settings.OPENSEARCH_PORT} "
+                f"({auth_marker}, {verify_marker})"
             )
-            logger.info(f"OpenSearch connected: {settings.OPENSEARCH_HOST}:{settings.OPENSEARCH_PORT}")
         return cls._client
 
     @classmethod

@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     # OpenSearch (벡터 검색용 - 기존 인프라)
     OPENSEARCH_HOST: str = "localhost"
     OPENSEARCH_PORT: int = 9200
+    # T-004: 전송 암호화 (TLS) + 기본 인증 옵션. 운영(K8s)에선 SealedSecret 으로
+    # USE_SSL=true / VERIFY_CERTS=true / CA_CERT_PATH 와 USER/PASSWORD 를 주입.
+    # dev 는 기본값(False) 으로 평문 9200. self-signed 면 VERIFY_CERTS=false +
+    # CA_CERT_PATH 비워두기.
+    OPENSEARCH_USE_SSL: bool = False
+    OPENSEARCH_VERIFY_CERTS: bool = False
+    OPENSEARCH_CA_CERT_PATH: str = ""  # PEM 파일 경로. VERIFY_CERTS=true 시 필요
+    OPENSEARCH_USER: str = ""  # security 플러그인 활성 시
+    OPENSEARCH_PASSWORD: str = ""  # security 플러그인 활성 시
 
     # 카카오 OAuth
     KAKAO_CLIENT_ID: str = ""
