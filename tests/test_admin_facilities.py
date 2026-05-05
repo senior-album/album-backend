@@ -39,6 +39,8 @@ from sqlalchemy import select
 from app.core.security import SecurityService
 from app.models.models import AdminAuditLog, Facility, Photo, Resident, User
 
+from tests._pii_seed import make_resident
+
 
 # ---------------------------------------------------------------------------
 # 헬퍼
@@ -125,9 +127,9 @@ async def test_list_facilities_returns_counts(integration_client, integration_db
     await _seed_user(session, email="g@x.io", role="guardian", facility_id=fac1.id)
     await _seed_user(session, email="s2@x.io", role="staff", facility_id=fac1.id)
     async with SessionLocal() as s:
-        s.add(Resident(id=str(uuid.uuid4()), facility_id=fac1.id, code="RES-1", name="R1"))
-        s.add(Resident(id=str(uuid.uuid4()), facility_id=fac1.id, code="RES-2", name="R2"))
-        s.add(Resident(id=str(uuid.uuid4()), facility_id=fac2.id, code="RES-3", name="R3"))
+        s.add(make_resident(facility_id=fac1.id, name="R1", code="RES-1"))
+        s.add(make_resident(facility_id=fac1.id, name="R2", code="RES-2"))
+        s.add(make_resident(facility_id=fac2.id, name="R3", code="RES-3"))
         for i in range(3):
             s.add(Photo(id=str(uuid.uuid4()), facility_id=fac1.id, original_url=f"u{i}"))
         await s.commit()

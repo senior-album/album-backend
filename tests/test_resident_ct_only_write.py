@@ -1,9 +1,9 @@
-"""T-003-5a — write 경로가 ct-only 로 동작하는지 통합 검증.
+"""T-003-5a/-5b — write 경로가 ct-only 로 동작하는지 통합 검증.
 
-`POST /residents` / `PUT /residents/{id}` / CSV import 후 DB row 의 평문 컬럼
-(`name`, `birth_date`, `medical_notes`) 이 NULL 이고 ct 컬럼만 채워졌는지 직접
-SQL 로 확인. 응답 단계에선 `apply_pii_decryption` 이 ct 를 평문으로 변환해
-client 에 정상 값을 돌려보내는지도 검증.
+`POST /residents` / `PUT /residents/{id}` 후 DB row 의 ct 컬럼만 채워지는지
+직접 SQL 로 확인. 5b 단계에선 평문 컬럼이 drop 됐으므로 access 자체가 불가능.
+응답 단계에선 `apply_pii_decryption` 이 ct 를 평문으로 변환해 client 에 정상
+값을 돌려보내는지도 검증.
 """
 
 from __future__ import annotations
@@ -91,10 +91,8 @@ async def test_post_resident_does_not_persist_plaintext(integration_client, inte
     # DB 직접 확인 — 평문 컬럼은 NULL
     async with SessionLocal() as s:
         row = (await s.execute(select(Resident).filter(Resident.id == body["id"]))).scalar_one()
-        assert row.name is None
-        assert row.birth_date is None
-        assert row.medical_notes is None
-        # 그러나 ct / dek / blind_idx 는 채워짐
+        # T-003-5b: 평문 PII 컬럼은 모델에서 drop 됐으므로 더 이상 access 불가.
+        # ct / dek / blind_idx 채워짐 검증으로 충분.
         assert row.dek_wrapped is not None
         assert row.name_ct is not None
         assert row.name_blind_idx is not None
@@ -138,7 +136,7 @@ async def test_put_resident_partial_update_keeps_other_ct(integration_client, in
 
     async with SessionLocal() as s:
         after = (await s.execute(select(Resident).filter(Resident.id == rid))).scalar_one()
-        assert after.name is None  # 평문은 여전히 NULL
+        # T-003-5b: 평문 컬럼이 drop 됐으므로 ct 차이로 검증
         assert after.name_ct != original_name_ct  # name 은 새 ct
         assert after.birth_date_ct == original_birth_ct  # birth_date 보존
 

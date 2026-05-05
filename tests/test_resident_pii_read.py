@@ -33,8 +33,6 @@ if _platform.system() == "Windows" and "magic" not in _sys.modules:
     _stub.from_file = lambda path, mime=False: "image/jpeg"  # type: ignore[attr-defined]
     _sys.modules["magic"] = _stub
 
-from sqlalchemy.orm.attributes import set_committed_value  # noqa: E402
-
 from app.api.residents import apply_pii_decryption, _apply_pii_encryption  # noqa: E402
 from app.core import crypto  # noqa: E402
 from app.core.crypto import encrypt_field, generate_dek, wrap_dek  # noqa: E402
@@ -42,15 +40,13 @@ from app.models.models import Resident  # noqa: E402
 
 
 def _make_resident(**overrides) -> Resident:
+    """T-003-5b 후 모델은 평문 PII 컬럼을 갖지 않는다 — ct/dek/blind_idx 만."""
     r = Resident(
         id="r1",
         facility_id="f1",
         code="RES-AAA",
-        name=None,
-        birth_date=None,
         gender=None,
         room_number=None,
-        medical_notes=None,
         name_ct=None,
         name_blind_idx=None,
         birth_date_ct=None,
@@ -63,36 +59,31 @@ def _make_resident(**overrides) -> Resident:
     return r
 
 
-def test_decrypt_noop_when_dek_missing():
-    """백필 전 row — dek_wrapped 가 None 이면 평문 컬럼이 그대로 응답에 흐른다."""
-    r = _make_resident(name="홍길동", birth_date="1940-03-15", medical_notes="고혈압")
-    apply_pii_decryption(r)
-    assert r.name == "홍길동"
-    assert r.birth_date == "1940-03-15"
-    assert r.medical_notes == "고혈압"
+def test_decrypt_no_dek_sets_plaintext_attrs_to_none():
+    """백필 누락 row 안전망 — dek_wrapped 가 None 이면 평문 attribute 를 None 으로 set.
 
-
-def test_decrypt_overrides_plaintext_with_ct_value():
-    """dual-write row — ct 값이 평문 컬럼을 덮어쓴다.
-
-    plaintext 와 ct 가 의도적으로 다른 값을 갖도록 만들어, 응답이 단순히 plaintext
-    fallback 이 아니라 ct 경로로 흐르는지 확인. 평문 fallback 만 작동하면 이 테스트가
-    실패한다.
+    T-003-5b 단계에선 평문 컬럼 자체가 drop 됐으므로 fallback 으로 가져올 평문이
+    없다. 응답에 stale leftover 가 새지 않도록 명시적으로 None.
     """
     r = _make_resident()
-    _apply_pii_encryption(r, name="ct_value")  # name_ct 에 "ct_value" 의 ciphertext 박힘
-    r.name = "stale_plaintext"  # plaintext 만 다른 값으로 바꿔치기
+    apply_pii_decryption(r)
+    assert r.name is None
+    assert r.birth_date is None
+    assert r.medical_notes is None
+
+
+def test_decrypt_returns_ct_value_via_instance_attribute():
+    """ct 가 있으면 decrypt 결과가 instance attribute 로 set 되고 응답에 흐른다."""
+    r = _make_resident()
+    _apply_pii_encryption(r, name="ct_value")
     apply_pii_decryption(r)
     assert r.name == "ct_value"
 
 
-def test_decrypt_partial_ct_leaves_other_columns_untouched():
-    """일부 컬럼만 ct 가 있는 row — 그 컬럼만 decrypt, 나머지는 plaintext 유지."""
+def test_decrypt_partial_ct_unset_columns_become_none():
+    """일부 컬럼만 ct 가 있는 row — 있는 컬럼은 decrypt, 없는 컬럼은 None."""
     dek = generate_dek()
     r = _make_resident(
-        name="placeholder",
-        birth_date="1945",
-        medical_notes=None,
         dek_wrapped=wrap_dek(dek),
         name_ct=encrypt_field("순자", dek),
         birth_date_ct=None,
@@ -100,7 +91,7 @@ def test_decrypt_partial_ct_leaves_other_columns_untouched():
     )
     apply_pii_decryption(r)
     assert r.name == "순자"
-    assert r.birth_date == "1945"  # ct 없음 → plaintext 그대로
+    assert r.birth_date is None
     assert r.medical_notes is None
 
 
@@ -135,12 +126,11 @@ def test_decrypt_unwraps_dek_once_per_row(monkeypatch):
     assert r.medical_notes == "고혈압"
 
 
-def test_encrypt_does_not_write_plaintext_columns():
-    """T-003-5a: write 가 평문 컬럼을 더 이상 set 하지 않는다.
+def test_encrypt_populates_ct_columns():
+    """write helper 는 ct / dek / blind_idx 컬럼만 채운다.
 
-    helper 시그니처가 input 평문을 인자로 받게 바뀌면서, 모델 컬럼의 평문 attribute
-    (`resident.name` 등) 는 만지지 않고 ct / dek / blind_idx 만 채워야 한다. 평문
-    set 이 다시 새어나오면 신규 row 에 평문이 디스크에 남게 되어 PII 보호가 깨진다.
+    T-003-5b 단계에선 모델에 평문 컬럼 자체가 없으므로 helper 가 자동으로
+    ct-only 동작 — 검증은 ct/dek/blind_idx 가 채워졌는지로 충분.
     """
     r = _make_resident()
     _apply_pii_encryption(
@@ -150,11 +140,6 @@ def test_encrypt_does_not_write_plaintext_columns():
         medical_notes="고혈압",
     )
 
-    # 평문 컬럼은 입력 후에도 None 그대로
-    assert r.name is None
-    assert r.birth_date is None
-    assert r.medical_notes is None
-    # ct / dek / blind_idx 는 채워짐
     assert r.dek_wrapped is not None
     assert r.name_ct is not None
     assert r.name_blind_idx is not None
@@ -184,50 +169,7 @@ def test_encrypt_partial_update_preserves_other_ct_columns():
     assert r.medical_notes_ct is None  # 손대지 않음
 
 
-def test_decrypt_does_not_dirty_orm_state():
-    """`set_committed_value` 사용 — decrypt 가 ORM dirty flag 를 세우면 안 됨.
-
-    decrypt 가 평문 attribute 를 set 하면서 SQLAlchemy 가 그 컬럼을 dirty 로 인식하면
-    뒤따르는 commit 에서 의도치 않게 평문 컬럼이 재기록된다. read 경로의 부수 효과를
-    피하기 위해 dirty 가 안 서야 한다.
-
-    "DB 에서 막 로딩된 row" 상태를 흉내내려고 ct/dek/평문 모두 `set_committed_value`
-    로 초기화 — 이러면 history 에 변화 없음. 그 위에서 `apply_pii_decryption` 을
-    돌려, decrypt 후에도 평문 컬럼들의 history 가 그대로 비어있어야 한다.
-    """
-    from sqlalchemy import inspect
-
-    dek = generate_dek()
-    wrapped = wrap_dek(dek)
-    name_ct = encrypt_field("ct_value", dek)
-
-    r = Resident(
-        id="r2",
-        facility_id="f1",
-        code="RES-BBB",
-        gender=None,
-        room_number=None,
-        is_active=True,
-    )
-    state = inspect(r)
-    # DB load 시뮬레이션 — 로드된 컬럼은 history 비어있음.
-    set_committed_value(r, "dek_wrapped", wrapped)
-    set_committed_value(r, "name_ct", name_ct)
-    set_committed_value(r, "birth_date_ct", None)
-    set_committed_value(r, "medical_notes_ct", None)
-    set_committed_value(r, "name", "stale_plaintext")
-    set_committed_value(r, "birth_date", None)
-    set_committed_value(r, "medical_notes", None)
-
-    # baseline — decrypt 전엔 평문 컬럼에 history 변화 없음
-    assert not state.attrs.name.history.has_changes()
-
-    apply_pii_decryption(r)
-
-    assert r.name == "ct_value"
-    # decrypt 후에도 평문 컬럼에 ORM-level dirty flag 가 서면 안 됨.
-    for col in ("name", "birth_date", "medical_notes"):
-        assert not state.attrs[col].history.has_changes(), (
-            f"apply_pii_decryption 이 '{col}' 을 dirty 로 만들었음 — "
-            "set_committed_value 가 아닌 일반 setattr 사용 의심"
-        )
+# T-003-5b: ORM dirty flag 검증 테스트 (set_committed_value 패턴) 는 더 이상
+# 의미 없음 — 평문 컬럼이 drop 되어 mapped attribute 가 사라졌으므로 dirty 발생
+# 기반 자체가 없다. apply_pii_decryption 은 일반 setattr 로 instance attribute
+# 를 set, ORM 추적 대상 아님.

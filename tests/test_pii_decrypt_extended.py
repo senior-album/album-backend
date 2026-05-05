@@ -1,9 +1,9 @@
-"""T-003-3b — residents.py 외 read 경로 (photos / guardians / invitations) 가
+"""T-003-3b/-5b — residents.py 외 read 경로 (photos / guardians / invitations) 가
 envelope decrypt 를 거치는지 검증.
 
-핵심 트릭: row 의 plaintext name 컬럼에 일부러 'stale' 값을 넣고 ct 에는 진짜
-값을 넣어둔다. 응답이 plaintext fallback 으로 흐르면 'stale' 이, ct 경로로
-흐르면 진짜 값이 나온다.
+T-003-5b 단계에선 평문 PII 컬럼이 모델/DB 양쪽에서 drop 됐으므로, ct 가 풀려
+instance attribute 로 set 되지 않으면 응답에 평문이 전혀 안 나온다 — 본 테스트
+들이 정상 평문을 받아낸다는 것 자체가 ct 경로로 정확히 흐르고 있음을 증명.
 """
 
 from __future__ import annotations
@@ -50,17 +50,15 @@ def test_helper_imported_in_consumer_modules():
     assert invitations.apply_pii_decryption is canonical
 
 
-def _make_resident_with_stale_plaintext(facility_id: str, *, real_name: str) -> Resident:
-    """ct 에는 real_name 을 박고 plaintext 컬럼은 'stale' 로 둔 row.
-
-    응답이 ct 경로로 흐르면 real_name, plaintext fallback 으로 흐르면 'stale'.
-    """
+def _make_resident_ct_only(facility_id: str, *, real_name: str) -> Resident:
+    """ct 에 real_name 을 박은 row. T-003-5b 로 평문 컬럼은 모델에서 제거됨 — 응답이
+    제대로 평문으로 보이려면 라우터의 `apply_pii_decryption` 이 ct 를 풀어 instance
+    attribute 에 set 해야 한다."""
     dek = generate_dek()
     return Resident(
         id=str(uuid.uuid4()),
         facility_id=facility_id,
         code=f"RES-{uuid.uuid4().hex[:6].upper()}",
-        name="stale_plaintext",
         dek_wrapped=wrap_dek(dek),
         name_ct=encrypt_field(real_name, dek),
         name_blind_idx=blind_index(real_name),
@@ -124,7 +122,7 @@ async def test_guardians_pending_list_returns_decrypted_resident_name(integratio
     staff = await _seed_staff(session, fac.id)
     guardian_user = await _seed_guardian_user(session)
 
-    resident = _make_resident_with_stale_plaintext(fac.id, real_name="진짜할머니")
+    resident = _make_resident_ct_only(fac.id, real_name="진짜할머니")
     session.add(resident)
     await session.commit()
 
@@ -147,7 +145,7 @@ async def test_guardians_pending_list_returns_decrypted_resident_name(integratio
     assert resp.status_code == 200, resp.text
     rows = resp.json()
     assert len(rows) == 1
-    # ct 경로로 흘렀어야 — plaintext fallback 이면 'stale_plaintext' 가 나옴
+    # ct 가 풀려 instance attribute 로 흐른 결과
     assert rows[0]["resident_name"] == "진짜할머니"
 
 
@@ -158,7 +156,7 @@ async def test_invitation_accept_returns_decrypted_resident_name(integration_cli
     fac = await _seed_facility(session)
     guardian_user = await _seed_guardian_user(session)
 
-    resident = _make_resident_with_stale_plaintext(fac.id, real_name="할머니진짜")
+    resident = _make_resident_ct_only(fac.id, real_name="할머니진짜")
     session.add(resident)
     await session.commit()
 

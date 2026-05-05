@@ -227,6 +227,7 @@ async def download_invitation_poster(
         raise HTTPException(status_code=404, detail="초대를 찾을 수 없습니다.")
 
     invitation, resident, facility = row
+    apply_pii_decryption(resident)  # T-003-3
 
     # 호출자가 해당 시설 직원인지 확인 — 타 시설 초대 포스터 발급 차단.
     if current_user.get("facility_id") != facility.id:
@@ -268,6 +269,10 @@ async def get_facility_invitations(
     )
     result = await db.execute(stmt)
     rows = result.all()
+
+    # T-003-3: Resident PII envelope decrypt
+    for _, res, _, _ in rows:
+        apply_pii_decryption(res)
 
     return [
         InvitationResponse(
@@ -326,6 +331,10 @@ async def get_my_invitations(
     )
     result = await db.execute(stmt)
     rows = result.all()
+
+    # T-003-3: Resident PII envelope decrypt
+    for _, res, _ in rows:
+        apply_pii_decryption(res)
 
     return [
         InvitationResponse(

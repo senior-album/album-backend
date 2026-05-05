@@ -82,9 +82,10 @@ async def test_stats_aggregates_correctly(integration_client, integration_db):
                      is_active=False, is_operator=False))
 
     # residents: active 2, inactive 1
-    session.add(Resident(id=str(uuid.uuid4()), facility_id=fac1.id, code="R-1", name="R1", is_active=True))
-    session.add(Resident(id=str(uuid.uuid4()), facility_id=fac1.id, code="R-2", name="R2", is_active=True))
-    session.add(Resident(id=str(uuid.uuid4()), facility_id=fac2.id, code="R-3", name="R3", is_active=False))
+    from tests._pii_seed import make_resident
+    session.add(make_resident(facility_id=fac1.id, name="R1", code="R-1", is_active=True))
+    session.add(make_resident(facility_id=fac1.id, name="R2", code="R-2", is_active=True))
+    session.add(make_resident(facility_id=fac2.id, name="R3", code="R-3", is_active=False))
 
     # photos: 3 total (1 today, 2 processed, 1 public)
     now = datetime.utcnow()
