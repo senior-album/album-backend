@@ -1,12 +1,17 @@
 """T-149: invitations 채널 확장 (sms / in_app)
 
-Revision ID: 007_invitation_inapp
-Revises: 006_resident_pii_backfill
+Revision ID: 008_invitation_inapp
+Revises: 007_residents_plaintext_nullable
 Create Date: 2026-05-05
 
 목적:
 - 가입 회원 초대 (in_app) 채널 도입. 직원이 이미 가입돼 있는 보호자를 검색해
   바로 초대를 보낼 수 있게. 외부 채널 (sms/알림톡) 의존을 줄이는 것이 목적.
+
+원래 007 로 PR 가 갔으나 같은 시점에 머지된 T-003-5a 의
+007_residents_plaintext_nullable 때문에 alembic head 가 분기됨 (multiple
+heads → `alembic upgrade head` 실패). 의미상 PII 작업과 독립이므로 008 로
+한 칸 미뤄 단일 chain 으로 정렬.
 
 변경:
 1. `invitations.invite_type` (varchar 20, NOT NULL, default 'sms') 추가.
@@ -25,8 +30,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "007_invitation_inapp"
-down_revision = "006_resident_pii_backfill"
+revision = "008_invitation_inapp"
+down_revision = "007_residents_plaintext_nullable"
 branch_labels = None
 depends_on = None
 
