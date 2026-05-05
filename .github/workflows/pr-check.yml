@@ -101,13 +101,15 @@ jobs:
           pip install pytest-cov==7.1.0
 
       - name: Run pytest with coverage
-        # T-124 핵심 영역만 --cov 로 강조 — 나머지 모듈은 여전히 측정되지만
-        # term 리포트의 시그널을 분명히 한다. PR #82/#83 에서 통합 테스트가
-        # 들어왔으므로 `app.api.auth` 도 게이트에 포함 (register/login/refresh/
-        # logout/get_me 풀 플로우). `app.api.photos` 는 endpoint 20+ 중
-        # `upload_photos` 1개만 통합 커버라 게이트 합산이 70% 밑으로 떨어질
-        # 위험 — 후속 PR 에서 list/get/delete/share 등 endpoint 커버리지 보강
-        # 후 추가 예정.
+        # T-124 핵심 영역 — JWT (security), 업로드 플로우 (storage / upload_photos),
+        # face_recognition, 그리고 인증 endpoint 본 흐름 (auth) — 만 --cov 로 강조.
+        # 나머지 모듈은 여전히 측정되지만 term 리포트의 시그널을 분명히 한다.
+        #
+        # `app.api.photos` 의 비-업로드 endpoint (list / get / delete / share /
+        # like / bulk-publish 등) 는 의도적으로 게이트 밖. T-124 정의는 "업로드
+        # 플로우" 까지로 한정되며 (sanitize · validate · rate limit · multipart
+        # upload 통합으로 커버 완료), 일반 CRUD endpoint 회귀 방지는 향후 별도
+        # 영역으로 다룬다. 새 게이트가 필요하면 그 때 신규 티켓으로.
         run: |
           pytest tests/ \
             --cov=app.core.security \
