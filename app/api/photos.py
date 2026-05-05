@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File,
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.residents import apply_pii_decryption
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.images import reencode_strip_metadata, reencode_with_thumbnail
@@ -168,9 +169,11 @@ async def _enrich_photos_with_residents(
 
     photo_ids = [p.id for p in photos]
 
-    # PhotoResident + Resident join으로 한번에 조회
+    # PhotoResident + Resident join으로 한번에 조회. T-003-3 envelope encryption
+    # 통과를 위해 full Resident 를 select 한 뒤 apply_pii_decryption 으로 ct→평문 변환
+    # 후 name 사용. (이전: `Resident.name` 만 가져와 plaintext 컬럼 직독)
     stmt = (
-        select(PhotoResident, Resident.name)
+        select(PhotoResident, Resident)
         .join(Resident, PhotoResident.resident_id == Resident.id)
         .filter(PhotoResident.photo_id.in_(photo_ids))
     )
@@ -179,13 +182,14 @@ async def _enrich_photos_with_residents(
 
     # photo_id별 매칭된 입소자 그룹핑
     photo_residents_map: dict[str, list[MatchedResidentInfo]] = {}
-    for pr, resident_name in rows:
+    for pr, resident in rows:
+        apply_pii_decryption(resident)
         if pr.photo_id not in photo_residents_map:
             photo_residents_map[pr.photo_id] = []
         photo_residents_map[pr.photo_id].append(
             MatchedResidentInfo(
                 resident_id=pr.resident_id,
-                resident_name=resident_name,
+                resident_name=resident.name,
                 confidence=pr.confidence,
             )
         )
@@ -219,11 +223,16 @@ async def _enrich_photos_with_residents(
         resp.matched_residents = photo_residents_map.get(p.id, [])
         resp.like_count = like_counts_map.get(p.id, 0)
         resp.liked_by_me = p.id in my_likes_set
-        # PhotoResident가 없는 경우 기존 resident_id에서 fallback
+        # PhotoResident가 없는 경우 기존 resident_id에서 fallback. T-003-3: full
+        # Resident 를 가져와 decrypt 후 name 사용 (plaintext 컬럼 직독 회피)
         if not resp.matched_residents and p.resident_id:
-            r_stmt = select(Resident.name).filter(Resident.id == p.resident_id)
+            r_stmt = select(Resident).filter(Resident.id == p.resident_id)
             r_result = await db.execute(r_stmt)
-            r_name = r_result.scalar_one_or_none()
+            r_obj = r_result.scalar_one_or_none()
+            r_name = None
+            if r_obj is not None:
+                apply_pii_decryption(r_obj)
+                r_name = r_obj.name
             resp.matched_residents = [
                 MatchedResidentInfo(
                     resident_id=p.resident_id,
@@ -651,14 +660,17 @@ async def debug_photo_residents(
 
         photo_debug = []
         for p in photos:
-            # PhotoResident 레코드
+            # PhotoResident 레코드. T-003-3: full Resident 를 가져와 decrypt 후 name
+            # 사용 (plaintext 컬럼 직독 회피)
             pr_stmt = (
-                select(PhotoResident, Resident.name)
+                select(PhotoResident, Resident)
                 .join(Resident, PhotoResident.resident_id == Resident.id)
                 .filter(PhotoResident.photo_id == p.id)
             )
             pr_result = await db.execute(pr_stmt)
             pr_rows = pr_result.all()
+            for _, _resident in pr_rows:
+                apply_pii_decryption(_resident)
 
             # PhotoFace 레코드
             pf_stmt = select(PhotoFace).filter(PhotoFace.photo_id == p.id)
@@ -671,8 +683,8 @@ async def debug_photo_residents(
                 "processing_status": p.processing_status,
                 "created_at": p.created_at.isoformat(),
                 "photo_residents": [
-                    {"resident_id": pr.resident_id, "resident_name": name, "confidence": pr.confidence}
-                    for pr, name in pr_rows
+                    {"resident_id": pr.resident_id, "resident_name": resident.name, "confidence": pr.confidence}
+                    for pr, resident in pr_rows
                 ],
                 "photo_faces": [
                     {"face_id": pf.id, "resident_id": pf.resident_id, "confidence": pf.confidence}
@@ -758,6 +770,7 @@ async def add_resident_tag(
         raise HTTPException(status_code=404, detail="입소자를 찾을 수 없습니다.")
     if resident.facility_id != photo.facility_id:
         raise HTTPException(status_code=400, detail="다른 시설의 입소자입니다.")
+    apply_pii_decryption(resident)  # T-003-3: 응답의 resident.name 이 ct 경로로 흐르도록
 
     # 이미 태그되어 있는지 확인
     existing = await db.execute(

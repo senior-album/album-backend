@@ -75,7 +75,7 @@ def _apply_pii_encryption(resident: Resident) -> None:
         resident.medical_notes_ct = encrypt_field(resident.medical_notes, dek)
 
 
-def _apply_pii_decryption(resident: Resident) -> None:
+def apply_pii_decryption(resident: Resident) -> None:
     """T-003-3 read 경로 — ct 컬럼이 있으면 decrypt 결과로 평문 attribute 를 덮어써서
     응답이 ciphertext 기반으로 흐르게 한다. 백필 전 row (`dek_wrapped` 가 None) 는
     no-op — 평문 컬럼이 그대로 응답으로 흐른다.
@@ -83,6 +83,8 @@ def _apply_pii_decryption(resident: Resident) -> None:
     `set_committed_value` 로 ORM dirty flag 를 우회 — 이후 같은 세션에서 commit 이
     일어나도 의도치 않게 평문 컬럼이 재기록되지 않는다 (read 호출이 write 를 유발해선
     안 됨).
+
+    photos / guardians / invitations 모듈에서도 import 해 쓰므로 public (no underscore).
     """
     if resident.dek_wrapped is None:
         return
@@ -110,7 +112,7 @@ async def list_residents(
     result = await db.execute(stmt)
     residents = result.scalars().all()
     for r in residents:
-        _apply_pii_decryption(r)
+        apply_pii_decryption(r)
     return [ResidentResponse.model_validate(r) for r in residents]
 
 
@@ -136,7 +138,7 @@ async def create_resident(
     db.add(new_resident)
     await db.commit()
     await db.refresh(new_resident)
-    _apply_pii_decryption(new_resident)
+    apply_pii_decryption(new_resident)
     return ResidentResponse.model_validate(new_resident)
 
 
@@ -330,7 +332,7 @@ async def get_resident(
     resident = result.scalar_one_or_none()
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
-    _apply_pii_decryption(resident)
+    apply_pii_decryption(resident)
     return ResidentDetailResponse.model_validate(resident)
 
 
@@ -381,7 +383,7 @@ async def update_resident(
 
     await db.commit()
     await db.refresh(resident)
-    _apply_pii_decryption(resident)
+    apply_pii_decryption(resident)
     return ResidentResponse.model_validate(resident)
 
 
@@ -513,7 +515,7 @@ async def register_face(
     resident = result.scalar_one_or_none()
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
-    _apply_pii_decryption(resident)
+    apply_pii_decryption(resident)
 
     if not FaceService.is_available():
         raise HTTPException(
@@ -590,7 +592,7 @@ async def get_resident_faces(
     resident = result.scalar_one_or_none()
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
-    _apply_pii_decryption(resident)
+    apply_pii_decryption(resident)
 
     try:
         faces = OpenSearchService.get_reference_faces(

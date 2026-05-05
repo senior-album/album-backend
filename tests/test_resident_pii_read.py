@@ -1,6 +1,6 @@
 """T-003-3 envelope encryption — read 경로 decrypt 단위 테스트.
 
-`_apply_pii_decryption` 의 두 갈래를 검증:
+`apply_pii_decryption` 의 두 갈래를 검증:
   1. dual-write row (`dek_wrapped` + `name_ct` 가 채워진 row) — ct decrypt 결과로
      평문 attribute 가 덮어씌워져 응답이 ct 기반으로 흐른다.
   2. 백필 전 row (`dek_wrapped` 가 None) — no-op. 평문 컬럼이 그대로 응답에 흐른다.
@@ -35,7 +35,7 @@ if _platform.system() == "Windows" and "magic" not in _sys.modules:
 
 from sqlalchemy.orm.attributes import set_committed_value  # noqa: E402
 
-from app.api.residents import _apply_pii_decryption, _apply_pii_encryption  # noqa: E402
+from app.api.residents import apply_pii_decryption, _apply_pii_encryption  # noqa: E402
 from app.core import crypto  # noqa: E402
 from app.core.crypto import encrypt_field, generate_dek, wrap_dek  # noqa: E402
 from app.models.models import Resident  # noqa: E402
@@ -66,7 +66,7 @@ def _make_resident(**overrides) -> Resident:
 def test_decrypt_noop_when_dek_missing():
     """백필 전 row — dek_wrapped 가 None 이면 평문 컬럼이 그대로 응답에 흐른다."""
     r = _make_resident(name="홍길동", birth_date="1940-03-15", medical_notes="고혈압")
-    _apply_pii_decryption(r)
+    apply_pii_decryption(r)
     assert r.name == "홍길동"
     assert r.birth_date == "1940-03-15"
     assert r.medical_notes == "고혈압"
@@ -82,7 +82,7 @@ def test_decrypt_overrides_plaintext_with_ct_value():
     r = _make_resident(name="ct_value")
     _apply_pii_encryption(r)  # name_ct 에 "ct_value" 의 ciphertext 박힘
     r.name = "stale_plaintext"  # plaintext 만 다른 값으로 바꿔치기
-    _apply_pii_decryption(r)
+    apply_pii_decryption(r)
     assert r.name == "ct_value"
 
 
@@ -98,7 +98,7 @@ def test_decrypt_partial_ct_leaves_other_columns_untouched():
         birth_date_ct=None,
         medical_notes_ct=None,
     )
-    _apply_pii_decryption(r)
+    apply_pii_decryption(r)
     assert r.name == "순자"
     assert r.birth_date == "1945"  # ct 없음 → plaintext 그대로
     assert r.medical_notes is None
@@ -127,7 +127,7 @@ def test_decrypt_unwraps_dek_once_per_row(monkeypatch):
     # encrypt 도 unwrap 을 1회 쓰므로, decrypt 직전에 카운터를 0으로 리셋.
     calls["n"] = 0
 
-    _apply_pii_decryption(r)
+    apply_pii_decryption(r)
     assert calls["n"] == 1
     assert r.name == "홍길동"
     assert r.birth_date == "1940-03-15"
@@ -142,7 +142,7 @@ def test_decrypt_does_not_dirty_orm_state():
     피하기 위해 dirty 가 안 서야 한다.
 
     "DB 에서 막 로딩된 row" 상태를 흉내내려고 ct/dek/평문 모두 `set_committed_value`
-    로 초기화 — 이러면 history 에 변화 없음. 그 위에서 `_apply_pii_decryption` 을
+    로 초기화 — 이러면 history 에 변화 없음. 그 위에서 `apply_pii_decryption` 을
     돌려, decrypt 후에도 평문 컬럼들의 history 가 그대로 비어있어야 한다.
     """
     from sqlalchemy import inspect
@@ -172,12 +172,12 @@ def test_decrypt_does_not_dirty_orm_state():
     # baseline — decrypt 전엔 평문 컬럼에 history 변화 없음
     assert not state.attrs.name.history.has_changes()
 
-    _apply_pii_decryption(r)
+    apply_pii_decryption(r)
 
     assert r.name == "ct_value"
     # decrypt 후에도 평문 컬럼에 ORM-level dirty flag 가 서면 안 됨.
     for col in ("name", "birth_date", "medical_notes"):
         assert not state.attrs[col].history.has_changes(), (
-            f"_apply_pii_decryption 이 '{col}' 을 dirty 로 만들었음 — "
+            f"apply_pii_decryption 이 '{col}' 을 dirty 로 만들었음 — "
             "set_committed_value 가 아닌 일반 setattr 사용 의심"
         )

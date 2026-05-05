@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.residents import apply_pii_decryption
 from app.core.audit import admin_audit
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -52,6 +53,11 @@ async def get_pending_guardians(
     result = await db.execute(stmt)
     rows = result.all()
 
+    # T-003-3: resident PII envelope decrypt — ct 가 있으면 평문 컬럼 덮어씀
+    for _, _, resident in rows:
+        if resident is not None:
+            apply_pii_decryption(resident)
+
     return [
         GuardianDetailResponse(
             id=guardian.id,
@@ -89,6 +95,11 @@ async def get_all_guardians(
     )
     result = await db.execute(stmt)
     rows = result.all()
+
+    # T-003-3: resident PII envelope decrypt
+    for _, _, resident in rows:
+        if resident is not None:
+            apply_pii_decryption(resident)
 
     return [
         GuardianDetailResponse(
@@ -259,6 +270,8 @@ async def get_my_approval_status(
 
     statuses = []
     for guardian, resident, facility in rows:
+        if resident is not None:
+            apply_pii_decryption(resident)  # T-003-3
         statuses.append({
             "guardian_id": guardian.id,
             "facility_id": facility.id,
@@ -335,12 +348,13 @@ async def get_my_photos(
     result = await db.execute(photo_stmt)
     photos = result.scalars().all()
 
-    # 각 사진에 대해 매칭된 입소자 이름 + ID 조회
+    # 각 사진에 대해 매칭된 입소자 이름 + ID 조회. T-003-3: tuple select 대신
+    # full Resident 를 조회 → decrypt → name 추출 (plaintext 컬럼 직독 회피)
     photo_results = []
     for photo in photos:
         # PhotoResident에서 이 사진에 매칭된 입소자 ID + 이름
         pr_stmt = (
-            select(Resident.id, Resident.name)
+            select(Resident)
             .join(PhotoResident, Resident.id == PhotoResident.resident_id)
             .filter(
                 PhotoResident.photo_id == photo.id,
@@ -348,15 +362,19 @@ async def get_my_photos(
             )
         )
         pr_result = await db.execute(pr_stmt)
-        matched_pairs = [(rid, rname) for rid, rname in pr_result.all()]
+        matched_residents = pr_result.scalars().all()
+        for r in matched_residents:
+            apply_pii_decryption(r)
+        matched_pairs = [(r.id, r.name) for r in matched_residents]
 
         # fallback: Photo.resident_id에서 이름
         if not matched_pairs and photo.resident_id:
-            r_stmt = select(Resident.id, Resident.name).filter(Resident.id == photo.resident_id)
+            r_stmt = select(Resident).filter(Resident.id == photo.resident_id)
             r_result = await db.execute(r_stmt)
-            row = r_result.first()
-            if row:
-                matched_pairs = [(row[0], row[1])]
+            r_obj = r_result.scalar_one_or_none()
+            if r_obj is not None:
+                apply_pii_decryption(r_obj)
+                matched_pairs = [(r_obj.id, r_obj.name)]
 
         matched_resident_ids = [rid for rid, _ in matched_pairs]
         matched_names = [rname for _, rname in matched_pairs]
@@ -401,9 +419,10 @@ async def get_my_residents(
     result = await db.execute(stmt)
     rows = result.all()
 
-    # 시설별로 그룹핑
+    # 시설별로 그룹핑. T-003-3: resident PII envelope decrypt
     facilities_map: dict = {}
     for guardian, resident, facility in rows:
+        apply_pii_decryption(resident)  # join (outerjoin 아님) 이므로 None 불가
         if facility.id not in facilities_map:
             facilities_map[facility.id] = {
                 "facility_id": facility.id,
