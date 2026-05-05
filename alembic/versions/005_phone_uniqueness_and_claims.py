@@ -26,13 +26,10 @@ def upgrade() -> None:
     # 1) 빈 문자열 phone -> NULL 정규화 (UNIQUE 충돌 방지)
     op.execute("UPDATE users SET phone = NULL WHERE phone = ''")
 
-    # 2) users.phone UNIQUE index — NULL 은 여러 개 허용
-    op.create_index(
-        "ix_users_phone_unique",
-        "users",
-        ["phone"],
-        unique=True,
-    )
+    # 2) users.phone UNIQUE constraint — 모델이 Column(unique=True) 라 constraint 형태로 일치시킴.
+    #    Postgres 는 unique constraint 를 내부적으로 unique index 로 구현하니 동작 동일.
+    #    NULL 은 여러 row 허용 (Postgres 기본 동작) → 미인증 사용자끼리 충돌 X.
+    op.create_unique_constraint("uq_users_phone", "users", ["phone"])
 
     # 3) phone_claim_reports
     op.create_table(
@@ -58,4 +55,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("phone_claim_reports")
-    op.drop_index("ix_users_phone_unique", table_name="users")
+    op.drop_constraint("uq_users_phone", "users", type_="unique")
