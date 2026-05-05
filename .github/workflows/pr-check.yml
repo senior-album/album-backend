@@ -102,8 +102,12 @@ jobs:
 
       - name: Run pytest with coverage
         # T-124 핵심 영역만 --cov 로 강조 — 나머지 모듈은 여전히 측정되지만
-        # term 리포트의 시그널을 분명히 한다. 향후 통합 테스트 라운드에서
-        # `app.api.photos` / `app.api.auth` 도 추가 예정.
+        # term 리포트의 시그널을 분명히 한다. PR #82/#83 에서 통합 테스트가
+        # 들어왔으므로 `app.api.auth` 도 게이트에 포함 (register/login/refresh/
+        # logout/get_me 풀 플로우). `app.api.photos` 는 endpoint 20+ 중
+        # `upload_photos` 1개만 통합 커버라 게이트 합산이 70% 밑으로 떨어질
+        # 위험 — 후속 PR 에서 list/get/delete/share 등 endpoint 커버리지 보강
+        # 후 추가 예정.
         run: |
           pytest tests/ \
             --cov=app.core.security \
@@ -111,6 +115,7 @@ jobs:
             --cov=app.services.face_recognition \
             --cov=app.services.opensearch_service \
             --cov=app.services.photo_worker \
+            --cov=app.api.auth \
             --cov-report=term \
             --cov-fail-under=70 \
             -v
