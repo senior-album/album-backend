@@ -56,6 +56,32 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Debug — versions dir + walk revisions
+        run: |
+          python -c "import sys; print('python', sys.version)"
+          python -c "import alembic; print('alembic', alembic.__version__)"
+          ls -la alembic/versions/ | head -30
+          python <<'PY'
+          import sys
+          sys.path.insert(0, '.')
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          cfg = Config('alembic.ini')
+          sd = ScriptDirectory.from_config(cfg)
+          # raw enumerate: try each file via _from_path
+          import alembic.script.base as ab
+          import pathlib
+          for fp in sorted(pathlib.Path('alembic/versions').glob('*.py')):
+              try:
+                  s = ab.Script._from_path(sd, fp.resolve())
+                  if s is None:
+                      print(f'SKIPPED None: {fp.name}')
+                  else:
+                      print(f'  loaded: {fp.name}  rev={s.revision!r}  down={s.down_revision!r}')
+              except Exception as e:
+                  print(f'  ERROR {fp.name}: {type(e).__name__}: {e}')
+          PY
+
       - name: alembic upgrade head (빈 DB 에 전체 마이그레이션 적용)
         run: alembic upgrade head
 
