@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     COOLSMS_API_SECRET: str = ""
     COOLSMS_FROM_NUMBER: str = ""
 
+    # T-041: 운영 장애 알림 Discord 웹훅. 비어있으면 알림 미전송 (no-op).
+    # SealedSecret backend-secret 으로 주입. URL 자체가 시크릿(토큰 path 포함)
+    # 이라 로그/에러 메시지에 절대 노출하지 말 것.
+    DISCORD_OPS_WEBHOOK_URL: str = ""
+
     # T-020: 운영자 부트스트랩. 앱 시작 시 이 이메일을 가진 활성 유저가 있으면
     # is_operator=True 로 promote. 빈 값이면 부트스트랩 스킵 (이미 promote 된 유저가
     # 있다고 가정). 콤마 구분 다중 이메일도 지원 — 예: "a@x,b@x".

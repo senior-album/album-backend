@@ -508,3 +508,114 @@ def test_stop_worker_no_op_when_no_task(monkeypatch):
     """_worker_task 가 None / done 이면 stop 은 조용히 통과."""
     monkeypatch.setattr(worker_module, "_worker_task", None)
     stop_worker()  # raise 없이 통과.
+
+
+# ---------------------------------------------------------------------------
+# T-041: 영구 실패 시 Discord 운영 알림 호출
+# ---------------------------------------------------------------------------
+
+
+class _AlertSpy:
+    """send_ops_alert 호출을 기록하는 awaitable mock."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def __call__(self, title, message, *, level="error", fields=None):
+        self.calls.append(
+            {"title": title, "message": message, "level": level, "fields": fields or {}}
+        )
+        return True
+
+
+@pytest.mark.asyncio
+async def test_alert_fires_when_photo_missing(monkeypatch, db: AsyncSession):
+    job = await _seed_pending_job(db)  # photo 없음 → "Photo not found"
+
+    spy = _AlertSpy()
+    monkeypatch.setattr(worker_module, "send_ops_alert", spy)
+    _patch_session_scope(monkeypatch, db)
+    _patch_runtime(monkeypatch)
+
+    assert await poll_and_process() is True
+
+    assert len(spy.calls) == 1
+    call = spy.calls[0]
+    assert "Photo processing job failed" in call["title"]
+    assert call["level"] == "error"
+    assert call["fields"]["job_id"] == job.id
+    assert "Photo not found" in call["fields"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_alert_fires_when_face_model_unavailable(monkeypatch, db: AsyncSession):
+    fac = await _seed_facility(db)
+    photo = await _seed_photo(db, fac.id)
+    await _seed_pending_job(db, photo=photo)
+
+    spy = _AlertSpy()
+    monkeypatch.setattr(worker_module, "send_ops_alert", spy)
+    _patch_session_scope(monkeypatch, db)
+    _patch_runtime(monkeypatch, is_available=False)
+
+    assert await poll_and_process() is True
+
+    assert len(spy.calls) == 1
+    assert "model not available" in spy.calls[0]["fields"]["reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_alert_fires_on_retry_exhaustion(monkeypatch, db: AsyncSession):
+    fac = await _seed_facility(db)
+    photo = await _seed_photo(db, fac.id)
+    job = await _seed_pending_job(db, photo=photo, max_retries=3)
+    job.retry_count = 2  # 다음 실패 = max 도달
+    await db.commit()
+
+    spy = _AlertSpy()
+    monkeypatch.setattr(worker_module, "send_ops_alert", spy)
+    _patch_session_scope(monkeypatch, db)
+    _patch_runtime(
+        monkeypatch,
+        detect_faces=lambda arr: (_ for _ in ()).throw(RuntimeError("model exploded")),
+    )
+
+    assert await poll_and_process() is True
+
+    assert len(spy.calls) == 1
+    assert "retry exhausted" in spy.calls[0]["fields"]["reason"]
+    assert "model exploded" in spy.calls[0]["fields"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_alert_does_not_fire_on_retryable_failure(monkeypatch, db: AsyncSession):
+    """retry 가 남아있으면 (status='pending' 으로 되돌아감) 알림 안 나간다."""
+    fac = await _seed_facility(db)
+    photo = await _seed_photo(db, fac.id)
+    await _seed_pending_job(db, photo=photo, max_retries=3)  # retry_count=0
+
+    spy = _AlertSpy()
+    monkeypatch.setattr(worker_module, "send_ops_alert", spy)
+    _patch_session_scope(monkeypatch, db)
+    _patch_runtime(
+        monkeypatch,
+        detect_faces=lambda arr: (_ for _ in ()).throw(RuntimeError("transient")),
+    )
+
+    assert await poll_and_process() is True
+    assert spy.calls == []  # retry 1 회로 끝, 영구 실패 아님
+
+
+@pytest.mark.asyncio
+async def test_alert_does_not_fire_on_success(monkeypatch, db: AsyncSession):
+    fac = await _seed_facility(db)
+    photo = await _seed_photo(db, fac.id)
+    await _seed_pending_job(db, photo=photo)
+
+    spy = _AlertSpy()
+    monkeypatch.setattr(worker_module, "send_ops_alert", spy)
+    _patch_session_scope(monkeypatch, db)
+    _patch_runtime(monkeypatch, detect_faces=lambda arr: [])
+
+    assert await poll_and_process() is True
+    assert spy.calls == []

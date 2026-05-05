@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.core.database import Database
 from app.core.storage import get_storage
 from app.models.models import Photo, PhotoFace, PhotoResident, PhotoProcessingJob
+from app.services.discord_notifier import send_ops_alert
 from app.services.face_recognition import FaceService
 from app.services.opensearch_service import OpenSearchService
 
@@ -161,6 +162,8 @@ async def poll_and_process():
         job.started_at = datetime.utcnow()
         await db.commit()
 
+        failure_reason: str | None = None
+
         try:
             # 사진 조회
             photo_result = await db.execute(
@@ -172,7 +175,9 @@ async def poll_and_process():
                 job.status = "failed"
                 job.error_message = "Photo not found"
                 job.completed_at = datetime.utcnow()
+                failure_reason = "Photo not found"
                 await db.commit()
+                await _notify_job_failed(job, failure_reason)
                 return True
 
             if not FaceService.is_available():
@@ -180,7 +185,9 @@ async def poll_and_process():
                 job.error_message = "Face recognition model not available"
                 job.completed_at = datetime.utcnow()
                 photo.processing_status = "no_model"
+                failure_reason = "Face recognition model not available"
                 await db.commit()
+                await _notify_job_failed(job, failure_reason)
                 return True
 
             # 실제 처리
@@ -197,12 +204,34 @@ async def poll_and_process():
                 job.status = "failed"
                 job.error_message = str(e)[:500]
                 job.completed_at = datetime.utcnow()
+                failure_reason = f"retry exhausted ({job.retry_count}/{job.max_retries}): {str(e)[:200]}"
             else:
                 job.status = "pending"  # 재시도
                 job.error_message = f"Retry {job.retry_count}: {str(e)[:300]}"
             await db.commit()
+            if failure_reason:
+                await _notify_job_failed(job, failure_reason)
 
         return True
+
+
+async def _notify_job_failed(job: PhotoProcessingJob, reason: str) -> None:
+    """T-041: 사진 처리 작업이 영구 실패 했을 때 운영 채널로 알림.
+
+    Discord 미설정이면 no-op. 알림 자체 실패는 swallow (notifier 가 raise 안 함).
+    """
+    await send_ops_alert(
+        title="Photo processing job failed",
+        message=f"Job {job.id} dropped after retries.",
+        level="error",
+        fields={
+            "job_id": job.id,
+            "photo_id": job.photo_id,
+            "facility_id": job.facility_id,
+            "retry_count": f"{job.retry_count}/{job.max_retries}",
+            "reason": reason,
+        },
+    )
 
 
 async def worker_loop():
