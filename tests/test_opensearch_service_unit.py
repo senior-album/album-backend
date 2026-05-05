@@ -11,6 +11,15 @@ T-107 의 `MAX_KNN_K` clamp + `RECLASSIFY_MAX_TOTAL` 페이지네이션 cap 이
 
 from __future__ import annotations
 
+# Settings 가 import 시점에 강제하는 secret 들 — 단독 실행에서도 동작하도록
+# setdefault. CI 는 자체 env 가 먼저 들어오므로 no-op 처리됨.
+import os as _os
+
+_os.environ.setdefault("JWT_SECRET", "test-secret-value-for-jwt-32-bytes-min")
+_os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret-32bytes-minimum")
+_os.environ.setdefault("RESIDENT_PII_KEK", "0" * 64)
+_os.environ.setdefault("RESIDENT_NAME_HMAC_KEY", "1" * 64)
+
 from typing import Any
 
 import numpy as np
@@ -487,3 +496,100 @@ def test_ensure_index_skips_when_dimension_matches(monkeypatch):
 
 def test_module_level_get_opensearch_returns_class():
     assert os_module.get_opensearch() is OpenSearchService
+
+
+# ---------------------------------------------------------------------------
+# T-004: TLS / auth 옵션 환경변수 주입
+# ---------------------------------------------------------------------------
+
+
+class _CaptureFactory:
+    """OpenSearch 생성자에 들어온 kwargs 를 캡처. 실제 client 행위는 _FakeClient 위임."""
+
+    def __init__(self):
+        self.captured: dict = {}
+
+    def __call__(self, **kwargs):
+        self.captured = kwargs
+        return _FakeClient()
+
+
+def _reset_client_singleton():
+    OpenSearchService._client = None
+
+
+def test_get_client_default_no_ssl_no_auth(monkeypatch):
+    """기본값(USE_SSL=False, USER/PASSWORD 빈 값) → 평문 + 인증 없음."""
+    _reset_client_singleton()
+    factory = _CaptureFactory()
+    monkeypatch.setattr(os_module, "OpenSearch", factory)
+
+    OpenSearchService.get_client()
+
+    assert factory.captured["use_ssl"] is False
+    assert factory.captured["verify_certs"] is False
+    assert "http_auth" not in factory.captured
+    assert "ca_certs" not in factory.captured
+    assert "ssl_show_warn" not in factory.captured  # SSL off 에선 의미 없음
+
+
+def test_get_client_ssl_with_self_signed(monkeypatch):
+    """USE_SSL=True + VERIFY_CERTS=False → ssl_show_warn=False 로 경고 폭주 차단."""
+    _reset_client_singleton()
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "OPENSEARCH_USE_SSL", True)
+    monkeypatch.setattr(settings, "OPENSEARCH_VERIFY_CERTS", False)
+
+    factory = _CaptureFactory()
+    monkeypatch.setattr(os_module, "OpenSearch", factory)
+
+    OpenSearchService.get_client()
+
+    assert factory.captured["use_ssl"] is True
+    assert factory.captured["verify_certs"] is False
+    assert factory.captured["ssl_show_warn"] is False
+    assert "ca_certs" not in factory.captured  # path 미지정
+
+
+def test_get_client_ssl_with_ca_cert_and_basic_auth(monkeypatch):
+    """USE_SSL=True + VERIFY_CERTS=True + CA_CERT_PATH + USER/PASSWORD → 운영 케이스."""
+    _reset_client_singleton()
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "OPENSEARCH_USE_SSL", True)
+    monkeypatch.setattr(settings, "OPENSEARCH_VERIFY_CERTS", True)
+    monkeypatch.setattr(settings, "OPENSEARCH_CA_CERT_PATH", "/etc/ssl/opensearch-ca.pem")
+    monkeypatch.setattr(settings, "OPENSEARCH_USER", "admin")
+    monkeypatch.setattr(settings, "OPENSEARCH_PASSWORD", "s3cret")
+
+    factory = _CaptureFactory()
+    monkeypatch.setattr(os_module, "OpenSearch", factory)
+
+    OpenSearchService.get_client()
+
+    assert factory.captured["use_ssl"] is True
+    assert factory.captured["verify_certs"] is True
+    assert factory.captured["ca_certs"] == "/etc/ssl/opensearch-ca.pem"
+    assert factory.captured["http_auth"] == ("admin", "s3cret")
+    # verify_certs=True 면 ssl_show_warn 은 안 들어가도 됨 (의미 없는 경고 안 남)
+    assert "ssl_show_warn" not in factory.captured
+
+
+def test_get_client_partial_auth_ignored(monkeypatch):
+    """USER 만 있고 PASSWORD 비어있으면 http_auth 미주입 (불완전한 자격 정보 방어)."""
+    _reset_client_singleton()
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "OPENSEARCH_USER", "admin")
+    monkeypatch.setattr(settings, "OPENSEARCH_PASSWORD", "")
+
+    factory = _CaptureFactory()
+    monkeypatch.setattr(os_module, "OpenSearch", factory)
+
+    OpenSearchService.get_client()
+
+    assert "http_auth" not in factory.captured
