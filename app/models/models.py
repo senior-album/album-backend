@@ -70,13 +70,16 @@ class Resident(Base):
     id = Column(String(36), primary_key=True)
     facility_id = Column(String(36), ForeignKey("facilities.id"), nullable=False, index=True)
     code = Column(String(20), unique=True, nullable=False, index=True)  # RES-XXXX
-    name = Column(String(255), nullable=False)
+    # T-003-5a: 평문 PII 컬럼은 nullable. write 경로는 더 이상 set 하지 않고
+    # ct 컬럼 (`name_ct` 등) 만 채운다. 백필된 row 도 평문은 NULL 로 비워졌다.
+    # T-003-5b 에서 컬럼 자체를 drop 예정.
+    name = Column(String(255), nullable=True)
     birth_date = Column(String(10), nullable=True)
     gender = Column(String(10), nullable=True)
     room_number = Column(String(50), nullable=True)
     medical_notes = Column(Text, nullable=True)
 
-    # T-003 envelope encryption — write 경로는 T-003-2 에서 추가, read 는 T-003-4. 이 단계는 컬럼만.
+    # T-003 envelope encryption.
     # Layout: name_ct = nonce(12B) || AESGCM(dek).encrypt(name_utf8). dek_wrapped = nonce(12B) || AESGCM(KEK).encrypt(dek). row 당 dek 1개를 PII 컬럼들이 공유.
     name_ct = Column(LargeBinary, nullable=True)
     name_blind_idx = Column(LargeBinary, nullable=True, index=True)

@@ -79,8 +79,8 @@ def test_decrypt_overrides_plaintext_with_ct_value():
     fallback 이 아니라 ct 경로로 흐르는지 확인. 평문 fallback 만 작동하면 이 테스트가
     실패한다.
     """
-    r = _make_resident(name="ct_value")
-    _apply_pii_encryption(r)  # name_ct 에 "ct_value" 의 ciphertext 박힘
+    r = _make_resident()
+    _apply_pii_encryption(r, name="ct_value")  # name_ct 에 "ct_value" 의 ciphertext 박힘
     r.name = "stale_plaintext"  # plaintext 만 다른 값으로 바꿔치기
     apply_pii_decryption(r)
     assert r.name == "ct_value"
@@ -118,12 +118,13 @@ def test_decrypt_unwraps_dek_once_per_row(monkeypatch):
 
     monkeypatch.setattr(residents_mod, "unwrap_dek", counting_unwrap)
 
-    r = _make_resident(
+    r = _make_resident()
+    _apply_pii_encryption(
+        r,
         name="홍길동",
         birth_date="1940-03-15",
         medical_notes="고혈압",
     )
-    _apply_pii_encryption(r)
     # encrypt 도 unwrap 을 1회 쓰므로, decrypt 직전에 카운터를 0으로 리셋.
     calls["n"] = 0
 
@@ -132,6 +133,55 @@ def test_decrypt_unwraps_dek_once_per_row(monkeypatch):
     assert r.name == "홍길동"
     assert r.birth_date == "1940-03-15"
     assert r.medical_notes == "고혈압"
+
+
+def test_encrypt_does_not_write_plaintext_columns():
+    """T-003-5a: write 가 평문 컬럼을 더 이상 set 하지 않는다.
+
+    helper 시그니처가 input 평문을 인자로 받게 바뀌면서, 모델 컬럼의 평문 attribute
+    (`resident.name` 등) 는 만지지 않고 ct / dek / blind_idx 만 채워야 한다. 평문
+    set 이 다시 새어나오면 신규 row 에 평문이 디스크에 남게 되어 PII 보호가 깨진다.
+    """
+    r = _make_resident()
+    _apply_pii_encryption(
+        r,
+        name="홍길동",
+        birth_date="1940-03-15",
+        medical_notes="고혈압",
+    )
+
+    # 평문 컬럼은 입력 후에도 None 그대로
+    assert r.name is None
+    assert r.birth_date is None
+    assert r.medical_notes is None
+    # ct / dek / blind_idx 는 채워짐
+    assert r.dek_wrapped is not None
+    assert r.name_ct is not None
+    assert r.name_blind_idx is not None
+    assert r.birth_date_ct is not None
+    assert r.medical_notes_ct is not None
+
+
+def test_encrypt_partial_update_preserves_other_ct_columns():
+    """PUT 부분 갱신 — 일부 필드만 인자로 주면 나머지 ct 는 그대로 보존."""
+    dek = generate_dek()
+    wrapped = wrap_dek(dek)
+    original_name_ct = encrypt_field("이전이름", dek)
+    original_birth_ct = encrypt_field("1940-01-01", dek)
+
+    r = _make_resident(
+        dek_wrapped=wrapped,
+        name_ct=original_name_ct,
+        birth_date_ct=original_birth_ct,
+        medical_notes_ct=None,
+    )
+
+    # name 만 갱신
+    _apply_pii_encryption(r, name="새이름")
+
+    assert r.name_ct != original_name_ct  # name 은 새 ct
+    assert r.birth_date_ct == original_birth_ct  # birth_date 는 보존
+    assert r.medical_notes_ct is None  # 손대지 않음
 
 
 def test_decrypt_does_not_dirty_orm_state():

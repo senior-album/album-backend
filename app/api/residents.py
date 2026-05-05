@@ -54,25 +54,34 @@ def generate_resident_code() -> str:
     return f"RES-{uuid.uuid4().hex[:6].upper()}"
 
 
-def _apply_pii_encryption(resident: Resident) -> None:
-    """T-003 dual-write — 평문 PII 컬럼에서 ciphertext / blind-index 컬럼을 동기화.
+def _apply_pii_encryption(
+    resident: Resident,
+    *,
+    name: str | None = None,
+    birth_date: str | None = None,
+    medical_notes: str | None = None,
+) -> None:
+    """T-003-5a write 경로 — 평문은 인자로 받아 ct / blind-index / DEK 컬럼만 채운다.
 
-    DEK 가 row 에 없으면 새로 생성 + wrap. 평문이 None 이면 ciphertext 도 그대로 둠
-    (새 row 일 때 None 채우기 / 갱신 안 된 필드 보존). 평문 컬럼은 손대지 않음 — 4단계
-    (T-003-4) 에서 read 가 ciphertext 로 완전히 넘어간 다음 write 평문도 멈춘다.
+    DEK 가 row 에 없으면 새로 생성 + wrap, 있으면 unwrap 해서 재사용. 인자가 None 이면
+    해당 ct 컬럼은 손대지 않음 (PUT 의 부분 갱신 / POST 의 옵션 필드 None 보존).
+
+    평문 컬럼 (`resident.name` 등) 은 더 이상 set 하지 않는다 — 호출자가 컬럼에 직접
+    값을 넣으면 안 된다는 뜻 (T-003-5b 에서 컬럼 자체 drop 예정). dual-write 시기엔
+    `resident.name = ...` 후 이 함수가 호출됐지만, 본 단계부터는 ct-only.
     """
     if resident.dek_wrapped is None:
         dek = generate_dek()
         resident.dek_wrapped = wrap_dek(dek)
     else:
         dek = unwrap_dek(resident.dek_wrapped)
-    if resident.name is not None:
-        resident.name_ct = encrypt_field(resident.name, dek)
-        resident.name_blind_idx = blind_index(resident.name)
-    if resident.birth_date is not None:
-        resident.birth_date_ct = encrypt_field(resident.birth_date, dek)
-    if resident.medical_notes is not None:
-        resident.medical_notes_ct = encrypt_field(resident.medical_notes, dek)
+    if name is not None:
+        resident.name_ct = encrypt_field(name, dek)
+        resident.name_blind_idx = blind_index(name)
+    if birth_date is not None:
+        resident.birth_date_ct = encrypt_field(birth_date, dek)
+    if medical_notes is not None:
+        resident.medical_notes_ct = encrypt_field(medical_notes, dek)
 
 
 def apply_pii_decryption(resident: Resident) -> None:
@@ -105,14 +114,17 @@ async def list_residents(
 ):
     """시설의 모든 입소자 목록"""
     await verify_facility_access(current_user, facility_id, db)
+    # T-003-5a: plaintext 컬럼은 새 row 부터 NULL — `ORDER BY Resident.name` 으로
+    # 정렬하면 모두 NULL 이라 의미 없음. SELECT 후 decrypt → Python 정렬.
     stmt = select(Resident).filter(
         Resident.facility_id == facility_id,
         Resident.is_active == True,
-    ).order_by(Resident.name)
+    )
     result = await db.execute(stmt)
     residents = result.scalars().all()
     for r in residents:
         apply_pii_decryption(r)
+    residents = sorted(residents, key=lambda r: r.name or "")
     return [ResidentResponse.model_validate(r) for r in residents]
 
 
@@ -124,17 +136,20 @@ async def create_resident(
 ):
     """새 입소자 등록 (직원만)"""
     await verify_facility_access(current_user, resident.facility_id, db)
+    # T-003-5a: 평문 컬럼은 set 하지 않고 ct 만 채운다.
     new_resident = Resident(
         id=str(uuid.uuid4()),
         facility_id=resident.facility_id,
         code=generate_resident_code(),
-        name=resident.name,
-        birth_date=resident.birth_date,
         gender=resident.gender,
         room_number=resident.room_number,
+    )
+    _apply_pii_encryption(
+        new_resident,
+        name=resident.name,
+        birth_date=resident.birth_date,
         medical_notes=resident.medical_notes,
     )
-    _apply_pii_encryption(new_resident)
     db.add(new_resident)
     await db.commit()
     await db.refresh(new_resident)
@@ -287,17 +302,21 @@ async def import_residents_csv(
             errors.append({"row": idx, "name": name, "reason": f"성별 값이 유효하지 않음: {gender_raw}"})
             continue
 
+        # T-003-5a: 평문 컬럼은 set 하지 않고 ct 만 채운다.
+        medical_notes = cleaned.get("medical_notes") or None
         new_resident = Resident(
             id=str(uuid.uuid4()),
             facility_id=facility_id,
             code=generate_resident_code(),
-            name=name,
-            birth_date=birth_date,
             gender=gender,
             room_number=cleaned.get("room_number") or None,
-            medical_notes=cleaned.get("medical_notes") or None,
         )
-        _apply_pii_encryption(new_resident)
+        _apply_pii_encryption(
+            new_resident,
+            name=name,
+            birth_date=birth_date,
+            medical_notes=medical_notes,
+        )
         db.add(new_resident)
         created.append({"row": idx, "name": name, "id": new_resident.id, "code": new_resident.code})
 
@@ -350,12 +369,12 @@ async def update_resident(
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
 
+    # T-003-5a: 평문 컬럼은 set 하지 않고 ct 만 갱신한다 (gender / room_number 는
+    # 암호화 대상 아니라 모델 컬럼에 직접 set).
     changed_fields: list[str] = []
     if resident_update.name is not None:
-        resident.name = resident_update.name
         changed_fields.append("name")
     if resident_update.birth_date is not None:
-        resident.birth_date = resident_update.birth_date
         changed_fields.append("birth_date")
     if resident_update.gender is not None:
         resident.gender = resident_update.gender
@@ -364,10 +383,14 @@ async def update_resident(
         resident.room_number = resident_update.room_number
         changed_fields.append("room_number")
     if resident_update.medical_notes is not None:
-        resident.medical_notes = resident_update.medical_notes
         changed_fields.append("medical_notes")
 
-    _apply_pii_encryption(resident)
+    _apply_pii_encryption(
+        resident,
+        name=resident_update.name,
+        birth_date=resident_update.birth_date,
+        medical_notes=resident_update.medical_notes,
+    )
 
     # T-102: 입소자 정보 수정 — 이름/의료 메모 등 PII 변경. 실제 값 대신
     # 변경된 필드명만 기록 (로그에 PII 재-저장 회피).
