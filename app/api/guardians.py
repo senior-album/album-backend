@@ -406,6 +406,8 @@ async def get_my_residents(
     db: AsyncSession = Depends(get_db),
 ):
     """보호자가 담당하는 입소자 목록 (시설별 그룹핑, 승인된 관계만)"""
+    # T-003-5a: plaintext 컬럼이 NULL 이라 `ORDER BY Resident.name` 은 더 이상
+    # 의미 없음. SELECT 후 decrypt → Python 정렬.
     stmt = (
         select(Guardian, Resident, Facility)
         .join(Resident, Guardian.resident_id == Resident.id)
@@ -414,7 +416,7 @@ async def get_my_residents(
             Guardian.user_id == current_user["user_id"],
             Guardian.is_approved == True,
         )
-        .order_by(Facility.name, Resident.name)
+        .order_by(Facility.name)
     )
     result = await db.execute(stmt)
     rows = result.all()
@@ -437,6 +439,10 @@ async def get_my_residents(
             "relationship_type": guardian.relationship_type,
             "guardian_id": guardian.id,
         })
+
+    # 시설별 입소자는 decrypted name 으로 정렬
+    for entry in facilities_map.values():
+        entry["residents"].sort(key=lambda r: r["name"] or "")
 
     return list(facilities_map.values())
 
