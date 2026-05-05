@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.residents import apply_pii_decryption
 from app.core.audit import admin_audit
 from app.core.database import get_db
 from app.core.security import require_operator
@@ -576,6 +577,11 @@ async def list_guardians(
 
     base = base.order_by(Guardian.created_at.desc()).offset((page - 1) * size).limit(size)
     rows = (await db.execute(base)).all()
+
+    # T-003-3: outerjoin 된 Resident 의 PII envelope decrypt
+    for _, _, res, _ in rows:
+        if res is not None:
+            apply_pii_decryption(res)
 
     items = [
         AdminGuardianOut(

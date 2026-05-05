@@ -16,7 +16,6 @@ from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File,
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.audit import admin_audit
 from app.core.config import get_settings
@@ -85,25 +84,30 @@ def _apply_pii_encryption(
 
 
 def apply_pii_decryption(resident: Resident) -> None:
-    """T-003-3 read 경로 — ct 컬럼이 있으면 decrypt 결과로 평문 attribute 를 덮어써서
-    응답이 ciphertext 기반으로 흐르게 한다. 백필 전 row (`dek_wrapped` 가 None) 는
-    no-op — 평문 컬럼이 그대로 응답으로 흐른다.
+    """T-003-3/-5b read 경로 — ct 컬럼을 decrypt 한 결과를 instance attribute 로 set 해
+    응답이 ciphertext 기반으로 흐르게 한다. 평문 컬럼이 5b 단계에서 drop 됐으므로
+    instance attribute 가 평문의 유일한 캐리어 — Pydantic `from_attributes=True` 가
+    이 attribute 를 그대로 읽어 응답에 담는다.
 
-    `set_committed_value` 로 ORM dirty flag 를 우회 — 이후 같은 세션에서 commit 이
-    일어나도 의도치 않게 평문 컬럼이 재기록되지 않는다 (read 호출이 write 를 유발해선
-    안 됨).
+    DEK 가 없는 row (이론상 prod 에 존재 X — 006 백필 + 007 NULL out 후) 는 평문
+    attribute 를 None 으로 명시 set — 응답에 stale leftover 가 새지 않게 안전망.
 
     photos / guardians / invitations 모듈에서도 import 해 쓰므로 public (no underscore).
     """
     if resident.dek_wrapped is None:
+        # 백필 누락 row 안전망 — 평문 attribute 를 None 으로 set.
+        resident.name = None
+        resident.birth_date = None
+        resident.medical_notes = None
         return
     dek = unwrap_dek(resident.dek_wrapped)
-    if resident.name_ct is not None:
-        set_committed_value(resident, "name", decrypt_field(resident.name_ct, dek))
-    if resident.birth_date_ct is not None:
-        set_committed_value(resident, "birth_date", decrypt_field(resident.birth_date_ct, dek))
-    if resident.medical_notes_ct is not None:
-        set_committed_value(resident, "medical_notes", decrypt_field(resident.medical_notes_ct, dek))
+    resident.name = decrypt_field(resident.name_ct, dek) if resident.name_ct is not None else None
+    resident.birth_date = (
+        decrypt_field(resident.birth_date_ct, dek) if resident.birth_date_ct is not None else None
+    )
+    resident.medical_notes = (
+        decrypt_field(resident.medical_notes_ct, dek) if resident.medical_notes_ct is not None else None
+    )
 
 
 @router.get("", response_model=list[ResidentResponse])

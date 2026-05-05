@@ -108,7 +108,8 @@ async def test_list_guardians_returns_all_with_joins(integration_client, integra
 
     g_user1 = await _seed_user(session, email="g1@x.io", role="guardian")
     g_user2 = await _seed_user(session, email="g2@x.io", role="guardian")
-    res = Resident(id=str(uuid.uuid4()), facility_id=fac1.id, code="RES-1", name="할머니")
+    from tests._pii_seed import make_resident
+    res = make_resident(facility_id=fac1.id, name="할머니", code="RES-1")
     session.add(res)
     await session.commit()
 

@@ -41,13 +41,9 @@ async def _facility(session, code="FAC-T"):
 
 
 async def _resident(session, facility_id):
+    from tests._pii_seed import make_resident
     hex6 = uuid.uuid4().hex[:6]
-    r = Resident(
-        id=str(uuid.uuid4()),
-        facility_id=facility_id,
-        code=f"R-{hex6}",
-        name=f"R-{hex6}",
-    )
+    r = make_resident(facility_id=facility_id, name=f"R-{hex6}", code=f"R-{hex6}")
     session.add(r)
     await session.commit()
     return r

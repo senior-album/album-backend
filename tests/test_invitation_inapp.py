@@ -85,13 +85,8 @@ async def _seed_user(
 
 
 async def _seed_resident(session, *, facility_id: str, name: str = "김할머니") -> Resident:
-    r = Resident(
-        id=str(uuid.uuid4()),
-        facility_id=facility_id,
-        code="RES-" + uuid.uuid4().hex[:6].upper(),
-        name=name,
-        is_active=True,
-    )
+    from tests._pii_seed import make_resident
+    r = make_resident(facility_id=facility_id, name=name)
     session.add(r)
     await session.commit()
     return r
