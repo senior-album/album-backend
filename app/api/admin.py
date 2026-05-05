@@ -41,9 +41,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.residents import apply_pii_decryption
 from app.core.audit import admin_audit
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import require_operator
 from app.models.models import Facility, Guardian, Photo, PhotoProcessingJob, Resident, User
+from app.services.discord_notifier import send_ops_alert
 
 logger = logging.getLogger(__name__)
 
@@ -903,3 +905,48 @@ async def admin_stats(
         user_signups_7d=_bucket(list(user_recent)),
         photo_uploads_7d=_bucket(list(photo_recent)),
     )
+
+
+# ---------------------------------------------------------------------------
+# T-041: 운영 알림 채널 헬스체크
+# ---------------------------------------------------------------------------
+
+
+class OpsTestAlertResponse(BaseModel):
+    configured: bool
+    sent: bool
+
+
+@router.post("/ops/test-alert", response_model=OpsTestAlertResponse)
+async def post_ops_test_alert(
+    operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> OpsTestAlertResponse:
+    """Discord 운영 알림 채널이 살아있는지 확인용 핑.
+
+    웹훅 URL 미설정이면 `configured=False, sent=False`. 설정돼있으면 실제 송출
+    시도 후 결과를 그대로 반환. 송출 결과와 무관하게 AdminAuditLog 에 호출
+    이력을 남긴다.
+    """
+    settings = get_settings()
+    configured = bool(settings.DISCORD_OPS_WEBHOOK_URL)
+
+    sent = False
+    if configured:
+        sent = await send_ops_alert(
+            title="Senior Album ops alert — test",
+            message=f"Test alert triggered by operator {operator.get('email') or operator.get('user_id')}.",
+            level="info",
+        )
+
+    admin_audit(
+        db,
+        action="ops_test_alert",
+        performed_by=operator.get("user_id"),
+        target_type="ops",
+        target_id="discord",
+        detail=f"configured={configured} sent={sent}",
+    )
+    await db.commit()
+
+    return OpsTestAlertResponse(configured=configured, sent=sent)
