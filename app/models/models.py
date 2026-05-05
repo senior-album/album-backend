@@ -293,6 +293,8 @@ class AdminAuditLog(Base):
     # facility_create       : 운영자가 신규 시설 생성 (T-145)
     # facility_update       : 운영자가 시설 정보(name/address/phone) 수정 (T-145)
     # photo_job_retry       : 운영자가 실패한 사진 처리 작업 재큐 (T-147)
+    # permission_grant      : 시설 관리자가 직원에게 메뉴 권한 위임 (T-150)
+    # permission_revoke     : 시설 관리자가 직원의 메뉴 권한 회수 (T-150)
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     action = Column(String(50), nullable=False, index=True)
     performed_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
@@ -302,6 +304,32 @@ class AdminAuditLog(Base):
     detail = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class UserPermission(Base):
+    """
+    T-150: 시설 직원에게 위임된 메뉴 권한.
+
+    시설장(`User.is_admin=True`) 본인은 자기 시설의 모든 키를 행 없이 자동
+    통과 — 본 테이블은 "위임 받은 직원" 만 행을 가진다 (DB 폭증 방지).
+    운영자(`User.is_operator=True`) 도 모든 키를 자동 통과 — 운영 대응상
+    위임 절차 없이 모든 시설 진입 가능.
+
+    permission_key 는 코드 레벨 카탈로그(`app.core.permissions.PermissionKey`)
+    가 단일 출처. DB 는 자유 문자열로 저장하지만 신규 키 발급은 카탈로그에
+    먼저 추가해야 한다 (오타·삭제된 키 방지).
+    """
+    __tablename__ = "user_permissions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    permission_key = Column(String(64), nullable=False, index=True)
+    granted_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    granted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "permission_key", name="uq_user_permissions_user_key"),
+    )
 
 
 class PhotoProcessingJob(Base):
