@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from sqlalchemy import select, desc, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.residents import apply_pii_decryption
 from app.core.audit import admin_audit
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -52,6 +53,7 @@ async def create_invitation(
     resident = res_result.scalar_one_or_none()
     if not resident:
         raise HTTPException(status_code=404, detail="해당 입소자를 찾을 수 없습니다.")
+    apply_pii_decryption(resident)  # T-003-3
 
     # 시설 정보
     fac_stmt = select(Facility).filter(Facility.id == facility_id)
@@ -342,6 +344,8 @@ async def accept_invitation(
     res_stmt = select(Resident).filter(Resident.id == invitation.resident_id)
     res_result = await db.execute(res_stmt)
     resident = res_result.scalar_one_or_none()
+    if resident is not None:
+        apply_pii_decryption(resident)  # T-003-3
 
     fac_stmt = select(Facility).filter(Facility.id == invitation.facility_id)
     fac_result = await db.execute(fac_stmt)
