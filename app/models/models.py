@@ -5,7 +5,7 @@ SQLAlchemy ORM 모델
 import uuid
 from datetime import datetime
 from sqlalchemy import (
-    Column, String, Integer, Float, DateTime, Text, Boolean, ForeignKey, JSON,
+    Column, String, Integer, Float, Date, DateTime, Text, Boolean, ForeignKey, JSON,
     LargeBinary, UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship
@@ -423,6 +423,40 @@ class RefreshToken(Base):
     ip_address = Column(String(45), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ResidentWellnessLog(Base):
+    """T-241: 입소자 안부 일지 — 시설 직원이 거동·식사 상태를 일일 기록.
+
+    한 입소자 × 하루 = 1 row (UNIQUE(resident_id, log_date)). PUT 으로 upsert —
+    같은 날짜 재호출은 같은 row 를 업데이트한다. read 권한은 시설 직원 (해당
+    시설) 또는 본인이 승인된 입소자의 가디언.
+
+    값 어휘 (스키마 레이어에서 화이트리스트 검증):
+      mobility_status: independent | walker | wheelchair | bedridden
+      meal_*         : full | partial | refused | skipped
+    한 시설마다 분류 기준이 갈릴 수 있어 free-text `notes` 를 같이 둠.
+    """
+    __tablename__ = "resident_wellness_logs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    resident_id = Column(String(36), ForeignKey("residents.id"), nullable=False, index=True)
+    log_date = Column(Date, nullable=False, index=True)
+
+    mobility_status = Column(String(20), nullable=True)
+    meal_breakfast = Column(String(20), nullable=True)
+    meal_lunch = Column(String(20), nullable=True)
+    meal_dinner = Column(String(20), nullable=True)
+    notes = Column(Text, nullable=True)
+
+    created_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("resident_id", "log_date", name="uq_resident_wellness_logs_resident_date"),
+    )
 
 
 class PhoneClaimReport(Base):
