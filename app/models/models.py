@@ -120,14 +120,22 @@ class Guardian(Base):
 
 
 class Invitation(Base):
-    """시설 → 보호자 초대"""
+    """시설 → 보호자 초대
+
+    T-149: invite_type 으로 채널 분기.
+    - 'sms'    : 외부 채널 (전화번호로 보내는 문자/알림톡). phone 필수.
+    - 'in_app' : 가입 회원 초대 — invitee_user_id 가 가리키는 기존 User 에게 인앱 알림.
+                 phone/email 은 비워둔다 (스냅샷 X — 사용자 phone 변경 따라가기 위함).
+    """
     __tablename__ = "invitations"
 
     id = Column(String(36), primary_key=True)
     facility_id = Column(String(36), ForeignKey("facilities.id"), nullable=False, index=True)
     resident_id = Column(String(36), ForeignKey("residents.id"), nullable=False, index=True)
-    phone = Column(String(20), nullable=True, index=True)  # 보호자 핸드폰 번호
-    email = Column(String(255), nullable=True, index=True)  # 보호자 이메일
+    invite_type = Column(String(20), nullable=False, default="sms", index=True)
+    phone = Column(String(20), nullable=True, index=True)  # 보호자 핸드폰 번호 (sms 채널)
+    email = Column(String(255), nullable=True, index=True)  # 보호자 이메일 (sms 채널 보조)
+    invitee_user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)  # in_app 채널
     relationship_type = Column(String(50), nullable=True)
     message = Column(Text, nullable=True)  # 직원이 보내는 메시지
 
@@ -136,7 +144,8 @@ class Invitation(Base):
 
     facility = relationship("Facility")
     resident = relationship("Resident")
-    inviter = relationship("User")
+    inviter = relationship("User", foreign_keys=[invited_by])
+    invitee = relationship("User", foreign_keys=[invitee_user_id])
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     accepted_at = Column(DateTime, nullable=True)

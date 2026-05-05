@@ -244,10 +244,17 @@ class GuardianCreate(BaseModel):
 # ==================== 초대 관련 스키마 ====================
 
 class InvitationCreate(BaseModel):
-    """보호자 초대 생성 (직원용) — phone 또는 email 중 하나 필수"""
+    """보호자 초대 생성 (직원용).
+
+    invite_type:
+    - 'sms'   : 문자메시지 채널 — phone 또는 email 중 하나 필수.
+    - 'in_app': 가입 회원 초대 — invitee_user_id 필수.
+    """
     resident_id: str
+    invite_type: str = "sms"
     phone: Optional[str] = None
     email: Optional[EmailStr] = None
+    invitee_user_id: Optional[str] = None
     relationship_type: Optional[str] = None
     message: Optional[str] = None
 
@@ -257,8 +264,11 @@ class InvitationResponse(BaseModel):
     id: str
     facility_id: str
     resident_id: str
+    invite_type: str = "sms"
     phone: Optional[str] = None
     email: Optional[str] = None
+    invitee_user_id: Optional[str] = None
+    invitee_name: Optional[str] = None  # in_app 초대 시 받는 사람 이름
     relationship_type: Optional[str] = None
     message: Optional[str] = None
     status: str
@@ -268,6 +278,18 @@ class InvitationResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class UserSearchResult(BaseModel):
+    """T-149: 가입 회원 초대 — 직원이 회원 검색 시 반환되는 마스킹된 결과.
+
+    개인정보 노출 최소화를 위해 정확 일치 (전화번호 또는 이메일 전체 일치) 만 매칭.
+    이름은 마지막 글자만, 연락처는 일부만 노출.
+    """
+    id: str
+    name_masked: str  # "홍길동" -> "홍O동"
+    phone_masked: Optional[str] = None  # "010-1234-5678" -> "010-****-5678"
+    email_masked: Optional[str] = None  # "abc@example.com" -> "a**@example.com"
 
 
 class FacilityConnectionRequest(BaseModel):
@@ -354,6 +376,12 @@ class NotificationResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class NotificationListResponse(BaseModel):
+    """알림 목록 응답 + 미읽음 카운트."""
+    items: List[NotificationResponse]
+    unread_count: int
 
 
 # ==================== 대시보드 스키마 ====================
