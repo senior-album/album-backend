@@ -1,7 +1,7 @@
-"""T-003-5b: residents 평문 PII 컬럼 DROP COLUMN
+"""T-003-5b: residents 평문 PII 컬럼 DROP COLUMN (+ multiple heads merge)
 
 Revision ID: 009_residents_drop_plaintext_columns
-Revises: 008_merge_post_5a_inapp
+Revises: 007_residents_plaintext_nullable, 007_invitation_inapp
 Create Date: 2026-05-05
 
 T-003-5a (PR #105) 가 평문 컬럼 write 를 멈추고 백필된 row 의 평문을 NULL out
@@ -31,8 +31,13 @@ from alembic import op
 
 
 # revision identifiers, used by Alembic.
+# T-003-5a (007_residents_plaintext_nullable) 와 T-149 (007_invitation_inapp) 가
+# 둘 다 006 자식이라 main 에 multiple heads. 본 마이그가 두 head 를 합치면서
+# 동시에 drop 도 수행 — alembic 가 자동 생성하는 빈 merge revision 패턴 대신,
+# 마이그 1개로 통합 (CI 의 alembic 1.18 에서 빈 merge revision 의 tuple
+# down_revision 이 KeyError 로 깨지는 이슈 회피).
 revision = "009_residents_drop_plaintext_columns"
-down_revision = "008_merge_post_5a_inapp"
+down_revision = ("007_residents_plaintext_nullable", "007_invitation_inapp")
 branch_labels = None
 depends_on = None
 
