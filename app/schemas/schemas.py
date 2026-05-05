@@ -3,8 +3,8 @@ Pydantic 스키마 정의
 요청/응답 데이터 검증 및 직렬화
 """
 
-from datetime import datetime
-from typing import Optional, List
+from datetime import date, datetime
+from typing import Literal, Optional, List
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -356,6 +356,41 @@ class FaceReviewRequest(BaseModel):
     """얼굴 분류 결과 검토"""
     resident_id: Optional[str] = None
     is_confirmed: bool = True
+
+
+# ==================== 안부 일지 스키마 (T-241) ====================
+
+# 한 시설마다 분류 기준이 다를 수 있어 정확한 분류는 free-text notes 로 보완.
+# 코드/UI 가 동일 어휘를 쓰도록 화이트리스트 — 미상의 값은 422 로 거부.
+MobilityStatus = Literal["independent", "walker", "wheelchair", "bedridden"]
+MealStatus = Literal["full", "partial", "refused", "skipped"]
+
+
+class WellnessLogUpsert(BaseModel):
+    """안부 일지 upsert 요청 (PUT body). 모든 필드 옵션 — 부분 갱신 허용."""
+    mobility_status: Optional[MobilityStatus] = None
+    meal_breakfast: Optional[MealStatus] = None
+    meal_lunch: Optional[MealStatus] = None
+    meal_dinner: Optional[MealStatus] = None
+    notes: Optional[str] = None
+
+
+class WellnessLogResponse(BaseModel):
+    """안부 일지 응답."""
+    id: str
+    resident_id: str
+    log_date: date
+    mobility_status: Optional[str] = None
+    meal_breakfast: Optional[str] = None
+    meal_lunch: Optional[str] = None
+    meal_dinner: Optional[str] = None
+    notes: Optional[str] = None
+    created_by: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 # ==================== 알림 관련 스키마 ====================
