@@ -187,15 +187,15 @@ async def request_facility_connection(
     db: AsyncSession = Depends(get_db),
 ):
     """보호자가 시설 코드로 연결 요청 (시설 직원이 승인). 전화 OTP 인증 통과가 선행돼야 함."""
-    # 전화번호 OTP 인증 게이트 — 인증 후 FRESH_WINDOW_SECONDS 이내여야 함
+    # 휴대폰 OTP 인증 게이트 — 한 번 인증된 phone_verified_at 은 OTP_REVERIFY_AFTER_DAYS 까지 신뢰.
     settings = get_settings()
     user_stmt = select(User).filter(User.id == current_user["user_id"])
     user_result = await db.execute(user_stmt)
     user = user_result.scalar_one_or_none()
     if not user or not user.phone_verified_at or not user.phone:
         raise HTTPException(status_code=400, detail="휴대폰 인증이 필요합니다.")
-    if user.phone_verified_at < datetime.utcnow() - timedelta(seconds=settings.OTP_FRESH_WINDOW_SECONDS):
-        raise HTTPException(status_code=400, detail="휴대폰 인증이 만료되었습니다. 다시 인증해주세요.")
+    if user.phone_verified_at < datetime.utcnow() - timedelta(days=settings.OTP_REVERIFY_AFTER_DAYS):
+        raise HTTPException(status_code=400, detail="휴대폰 재인증이 필요합니다. 마지막 인증 후 1년이 경과했습니다.")
 
     # 시설 코드로 시설 조회
     fac_stmt = select(Facility).filter(Facility.code == req.facility_code)

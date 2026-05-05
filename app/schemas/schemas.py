@@ -78,6 +78,18 @@ class PhoneOtpVerifyRequest(BaseModel):
     code: str
 
 
+class PhoneClaimRequest(BaseModel):
+    """'이 번호 내가 등록 안 했어요' 신고. note 는 자유 텍스트 (선택)."""
+    phone: str
+    note: str | None = None
+
+
+class PhoneClaimResponse(BaseModel):
+    """신고 접수 확인."""
+    id: str
+    created_at: datetime
+
+
 # ==================== 사용자 관련 스키마 ====================
 
 class UserResponse(BaseModel):

@@ -7,6 +7,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -22,6 +23,8 @@ from app.services.phone_otp import (
     send_otp,
     verify_otp,
 )
+
+PHONE_DUP_DETAIL = "이미 다른 계정에 등록된 번호입니다."
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +66,8 @@ async def verify_phone_otp(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    인증번호 검증. 성공 시 User.phone + phone_verified_at 을 갱신해
-    이후 10분 이내의 시설 연결 요청이 게이트를 통과할 수 있게 한다.
+    인증번호 검증. 성공 시 User.phone + phone_verified_at 을 갱신.
+    이미 다른 계정에 등록된 번호면 409 — 프론트가 신고 (POST /support/phone-claim) 안내.
     """
     phone = _validate_phone(body.phone)
 
@@ -73,16 +76,26 @@ async def verify_phone_otp(
     except OtpVerifyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # 사용자 전화번호 + 인증 시각 업데이트
+    # 다른 계정이 이미 그 phone 으로 등록돼있는지 사전 검사 (race 는 commit 의 IntegrityError 가 잡음)
+    dup_stmt = select(User).filter(
+        User.phone == phone,
+        User.id != current_user["user_id"],
+    )
+    if (await db.execute(dup_stmt)).scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=PHONE_DUP_DETAIL)
+
     stmt = select(User).filter(User.id == current_user["user_id"])
-    result = await db.execute(stmt)
-    user = result.scalar_one_or_none()
+    user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
 
     user.phone = phone
     user.phone_verified_at = datetime.utcnow()
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=PHONE_DUP_DETAIL)
 
     return {"message": "인증되었습니다.", "verified_at": user.phone_verified_at.isoformat()}
 
