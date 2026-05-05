@@ -1,6 +1,6 @@
 """T-003-5b: residents 평문 PII 컬럼 DROP COLUMN
 
-Revision ID: 009_residents_drop_plaintext_columns
+Revision ID: 009_drop_residents_plaintext
 Revises: 008_invitation_inapp
 Create Date: 2026-05-05
 
@@ -33,7 +33,7 @@ from alembic import op
 # revision identifiers, used by Alembic.
 # main 의 PR #107 (T-149 rebase) 가 007_invitation_inapp 을 008_invitation_inapp
 # 으로 sequential rebase 하면서 multi-head 가 해소된 상태. 단일 down_revision.
-revision = "009_residents_drop_plaintext_columns"
+revision = "009_drop_residents_plaintext"  # alembic_version 컬럼 32자 제한 — 짧게.
 down_revision = "008_invitation_inapp"
 branch_labels = None
 depends_on = None
