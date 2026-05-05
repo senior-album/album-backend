@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select, func, desc, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.residents import apply_pii_decryption
 from app.core.database import get_db
 from app.core.redis import check_rate_limit
 from app.core.security import get_current_user, get_current_staff
@@ -186,6 +187,8 @@ async def get_facility_residents(
     )
     result = await db.execute(stmt)
     residents = result.scalars().all()
+    for r in residents:
+        apply_pii_decryption(r)  # T-003: ct→평문 instance attr (모델 평문 컬럼 drop 됨)
 
     return [ResidentResponse.model_validate(r) for r in residents]
 
@@ -436,6 +439,8 @@ async def get_facility_stats(
         .order_by(Resident.created_at.desc())
     )
     no_guardian_residents = (await db.execute(no_guardian_stmt)).scalars().all()
+    for r in no_guardian_residents[:3]:
+        apply_pii_decryption(r)  # T-003: topNames 추출 전 ct→평문
     residents_without_guardian = {
         "count": len(no_guardian_residents),
         "topNames": [r.name for r in no_guardian_residents[:3]],
@@ -488,6 +493,8 @@ async def get_facility_stats(
     except Exception as e:
         logger.warning(f"[stats] OpenSearch reference aggregation failed: {e}")
     no_face_residents = [r for r in all_residents if r.id not in residents_with_face_ids]
+    for r in no_face_residents[:3]:
+        apply_pii_decryption(r)  # T-003: topNames 추출 전 ct→평문
     residents_without_face = {
         "count": len(no_face_residents),
         "topNames": [r.name for r in no_face_residents[:3]],
