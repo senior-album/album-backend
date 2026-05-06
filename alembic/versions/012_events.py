@@ -44,7 +44,7 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("start_at", sa.DateTime(), nullable=False),
         sa.Column("end_at", sa.DateTime(), nullable=True),
-        sa.Column("all_day", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("all_day", sa.Boolean(), nullable=False),
         sa.Column(
             "created_by", sa.String(36), sa.ForeignKey("users.id"), nullable=False
         ),
