@@ -1,7 +1,7 @@
 """T-243: events 테이블 생성
 
-Revision ID: 012_events
-Revises: 011_user_permissions
+Revision ID: 013_events
+Revises: 012_user_staff_approval
 Create Date: 2026-05-06
 
 이벤트 캘린더 — 시설 직원이 입소자/시설 단위 일정 (생신·외출·기타) 을 등록.
@@ -11,14 +11,18 @@ type 어휘는 스키마 레이어 (Literal) 에서만 검증 — 컬럼은 Stri
 read 권한: 시설 직원 | 가디언 | 운영자. write 권한: 시설 직원.
 
 downgrade 는 테이블 drop. 운영 데이터가 쌓인 상태에선 되돌릴 일 없음 — 비상용.
+
+note: 본 마이그는 원래 `012_events` 였으나 main 의 T-056 (`012_user_staff_approval`)
+가 같은 시점에 머지되며 alembic head 가 둘로 갈라졌다. 두 migrate 모두 컬럼
+관계는 독립이라 단순히 본 마이그를 T-056 다음 (013) 으로 chain 재배치해 해결.
 """
 
 from alembic import op
 import sqlalchemy as sa
 
 
-revision = "012_events"
-down_revision = "011_user_permissions"
+revision = "013_events"
+down_revision = "012_user_staff_approval"
 branch_labels = None
 depends_on = None
 

@@ -56,7 +56,11 @@ async def _seed_user(
     role: str = "staff",
     facility_id: str | None = None,
     is_operator: bool = False,
+    is_staff_approved: bool = True,
 ) -> User:
+    # T-056: staff 는 기본 미승인이라 verify_facility_access 가 차단. 본 헬퍼는
+    # "이미 승인된 staff" 가 기본 시드라는 의미로 True. 미승인 케이스를 검증할
+    # 때만 명시적으로 False 전달.
     u = User(
         id=str(uuid.uuid4()),
         email=email,
@@ -65,6 +69,7 @@ async def _seed_user(
         role=role,
         is_active=True,
         is_operator=is_operator,
+        is_staff_approved=is_staff_approved,
         facility_id=facility_id,
     )
     session.add(u)
