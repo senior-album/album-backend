@@ -4,7 +4,7 @@ Firebase 토큰 검증, JWT 생성/검증, 역할 기반 접근 제어
 """
 
 from datetime import datetime, timedelta
-from typing import Optional, Callable, Tuple
+from typing import Dict, Optional, Callable, Tuple
 from functools import wraps
 import logging
 import secrets
@@ -19,6 +19,31 @@ from app.core.config import get_settings
 from app.core.database import get_db
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_jwt_secret(token: str, keyset: Dict[str, str]) -> str:
+    """T-055: token 헤더의 `kid` 를 보고 keyset 에서 검증용 secret 선택.
+
+    - kid 가 있고 keyset 에 매칭되면 해당 secret 반환.
+    - kid 가 keyset 에 없으면 `JWTError` (우리 발급 도메인 외부 토큰).
+    - kid 가 없는 토큰 (legacy 단일 키 모드로 발급) 은 'legacy' 키 fallback.
+      legacy 도 없으면 `JWTError` — 회전 완료 후 단계.
+    헤더 자체가 깨진 토큰은 아래의 `jwt.decode` 가 어차피 실패시키므로 빈 문자열 반환.
+    """
+    try:
+        header = jwt.get_unverified_header(token)
+    except JWTError:
+        return ""
+    kid = header.get("kid")
+    if kid:
+        secret = keyset.get(kid)
+        if secret is None:
+            raise JWTError(f"unknown kid: {kid}")
+        return secret
+    legacy = keyset.get("legacy")
+    if legacy:
+        return legacy
+    raise JWTError("token missing kid and no legacy key configured")
 
 # 쿠키 설정 상수
 COOKIE_NAME = "access_token"
@@ -37,7 +62,7 @@ class SecurityService:
         data: dict,
         expires_delta: Optional[timedelta] = None,
     ) -> str:
-        """JWT 액세스 토큰 생성"""
+        """JWT 액세스 토큰 생성. T-055: 활성 kid 로 서명 + 헤더에 kid 포함."""
         settings = get_settings()
 
         to_encode = data.copy()
@@ -48,22 +73,29 @@ class SecurityService:
 
         to_encode.update({"exp": expire})
 
-        encoded_jwt = jwt.encode(
+        kid = settings.JWT_ACTIVE_KID
+        secret = settings.jwt_keys[kid]
+        # 'legacy' kid 는 호환을 위해 헤더에 박지 않는다 — 단일 키 모드로 발급된
+        # 토큰은 legacy 운영 시기와 동일한 형태(헤더 무 kid)로 유지해 디코딩 경로
+        # 하나로 흡수된다.
+        headers = {"kid": kid} if kid != "legacy" else None
+        return jwt.encode(
             to_encode,
-            settings.JWT_SECRET,
+            secret,
             algorithm=settings.JWT_ALGORITHM,
+            headers=headers,
         )
-        return encoded_jwt
 
     @staticmethod
     def verify_token(token: str) -> dict:
-        """JWT access 토큰 검증 및 payload 반환"""
+        """JWT access 토큰 검증 및 payload 반환. T-055: kid 헤더로 키 lookup."""
         settings = get_settings()
 
         try:
+            secret = _resolve_jwt_secret(token, settings.jwt_keys)
             payload = jwt.decode(
                 token,
-                settings.JWT_SECRET,
+                secret,
                 algorithms=[settings.JWT_ALGORITHM],
             )
             return payload
@@ -79,6 +111,7 @@ class SecurityService:
     def create_refresh_token(user_id: str, jti: str) -> Tuple[str, datetime]:
         """
         Refresh 토큰 생성. jti는 호출자가 미리 생성해서 DB에 저장한 후 전달.
+        T-055: 활성 refresh kid 로 서명 + 헤더에 kid 포함.
         Returns (jwt_token, expires_at).
         """
         settings = get_settings()
@@ -89,17 +122,27 @@ class SecurityService:
             "type": "refresh",
             "exp": expires_at,
         }
-        token = jwt.encode(payload, settings.JWT_REFRESH_SECRET, algorithm=settings.JWT_ALGORITHM)
+        kid = settings.JWT_REFRESH_ACTIVE_KID
+        secret = settings.jwt_refresh_keys[kid]
+        headers = {"kid": kid} if kid != "legacy" else None
+        token = jwt.encode(
+            payload,
+            secret,
+            algorithm=settings.JWT_ALGORITHM,
+            headers=headers,
+        )
         return token, expires_at
 
     @staticmethod
     def verify_refresh_token(token: str) -> dict:
-        """Refresh 토큰 서명·만료 검증 (DB 조회는 호출자가 별도 수행)"""
+        """Refresh 토큰 서명·만료 검증 (DB 조회는 호출자가 별도 수행).
+        T-055: kid 헤더로 refresh keyset lookup."""
         settings = get_settings()
         try:
+            secret = _resolve_jwt_secret(token, settings.jwt_refresh_keys)
             payload = jwt.decode(
                 token,
-                settings.JWT_REFRESH_SECRET,
+                secret,
                 algorithms=[settings.JWT_ALGORITHM],
             )
             if payload.get("type") != "refresh":

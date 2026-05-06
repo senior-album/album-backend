@@ -2,9 +2,28 @@
 환경 변수 및 애플리케이션 설정
 """
 
-from pydantic import Field, computed_field
+import os
+from typing import Dict
+
+from pydantic import Field, PrivateAttr, computed_field
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+
+def _scan_kid_env(prefix: str) -> Dict[str, str]:
+    """`{prefix}<KID>` 형태 환경변수를 모아 `{kid: secret}` 맵 반환. kid 는 소문자 정규화.
+
+    예: prefix='JWT_KEY_' 일 때 `JWT_KEY_V1=abc` 와 `JWT_KEY_V2=def` 가 있으면
+    `{'v1': 'abc', 'v2': 'def'}`. 빈 값 envvar 는 무시.
+    """
+    out: Dict[str, str] = {}
+    plen = len(prefix)
+    for k, v in os.environ.items():
+        if k.startswith(prefix) and v:
+            kid = k[plen:].lower()
+            if kid:
+                out[kid] = v
+    return out
 
 
 class Settings(BaseSettings):
@@ -37,14 +56,28 @@ class Settings(BaseSettings):
     # Redis (로컬)
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # JWT (T-009 refresh token 도입)
-    # JWT_SECRET / JWT_REFRESH_SECRET 둘 다 .env 또는 K8s Secret으로 주입 필수
+    # JWT (T-009 refresh token 도입, T-055 rolling key 인프라)
+    # 두 가지 주입 방식 지원:
+    # 1) 단일 키 (legacy 호환): `JWT_SECRET` / `JWT_REFRESH_SECRET` 만 주입.
+    #    토큰은 kid 헤더 없이 발급되고 검증 시 자동으로 'legacy' 키 사용.
+    # 2) Rolling key (T-055): `JWT_KEY_<KID>` / `JWT_REFRESH_KEY_<KID>` 다수
+    #    + `JWT_ACTIVE_KID` / `JWT_REFRESH_ACTIVE_KID` 로 발급용 kid 지정.
+    #    토큰 헤더에 kid 가 박혀 검증 시 해당 키 lookup. 회전 = 새 kid 추가 후
+    #    ACTIVE 전환, grace 후 옛 kid 환경변수 제거.
+    # 둘 다 비면 startup fail (`model_post_init` 에서 검증).
     # 생성: python -c "import secrets; print(secrets.token_urlsafe(48))"
-    JWT_SECRET: str = Field(...)
-    JWT_REFRESH_SECRET: str = Field(...)  # access와 분리 (탈취 시 영향 격리)
+    JWT_SECRET: str = ""
+    JWT_REFRESH_SECRET: str = ""  # access와 분리 (탈취 시 영향 격리)
+    JWT_ACTIVE_KID: str = ""  # 비면 'legacy' 또는 첫 등록 kid
+    JWT_REFRESH_ACTIVE_KID: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60  # access: 60분 (T-009 이전엔 7일)
     JWT_REFRESH_EXPIRE_MINUTES: int = 60 * 24 * 14  # refresh: 14일 (B1 rotation)
+
+    # T-055: kid → secret 맵. `model_post_init` 이 환경변수 스캔으로 채움.
+    # 호출자는 `settings.jwt_keys` / `settings.jwt_refresh_keys` 프로퍼티로 읽는다.
+    _jwt_keys: Dict[str, str] = PrivateAttr(default_factory=dict)
+    _jwt_refresh_keys: Dict[str, str] = PrivateAttr(default_factory=dict)
 
     # T-003 envelope encryption — Resident PII (name / birth_date / medical_notes).
     # 둘 다 base64 로 인코딩된 32바이트 키 (`openssl rand -base64 32` 결과 그대로).
@@ -143,6 +176,63 @@ class Settings(BaseSettings):
         # 예: Alembic Phase 2 에서 DDL_AUTO 를 제거했지만 클러스터 configmap 에
         #     아직 남아있을 때.
         extra = "ignore"
+
+    def model_post_init(self, __context) -> None:
+        # T-055: rolling key 키셋 빌드 + 활성 kid 결정. 부트 시 한 번만 실행됨
+        # (`get_settings` 가 lru_cache 라 인스턴스도 한 개).
+        access_keys = _scan_kid_env("JWT_KEY_")
+        refresh_keys = _scan_kid_env("JWT_REFRESH_KEY_")
+
+        # 단일 키 호환 — JWT_SECRET 이 있으면 'legacy' kid 로 등록.
+        if self.JWT_SECRET:
+            access_keys.setdefault("legacy", self.JWT_SECRET)
+        if self.JWT_REFRESH_SECRET:
+            refresh_keys.setdefault("legacy", self.JWT_REFRESH_SECRET)
+
+        if not access_keys:
+            raise ValueError(
+                "Access JWT 키가 하나도 설정되지 않았습니다. "
+                "JWT_SECRET 또는 JWT_KEY_<KID> 형태 환경변수를 주입해야 합니다."
+            )
+        if not refresh_keys:
+            raise ValueError(
+                "Refresh JWT 키가 하나도 설정되지 않았습니다. "
+                "JWT_REFRESH_SECRET 또는 JWT_REFRESH_KEY_<KID> 형태 환경변수를 주입해야 합니다."
+            )
+
+        active = self.JWT_ACTIVE_KID or (
+            "legacy" if "legacy" in access_keys else next(iter(access_keys))
+        )
+        active_refresh = self.JWT_REFRESH_ACTIVE_KID or (
+            "legacy" if "legacy" in refresh_keys else next(iter(refresh_keys))
+        )
+        if active not in access_keys:
+            raise ValueError(
+                f"JWT_ACTIVE_KID={active!r} 가 등록된 access 키 "
+                f"{sorted(access_keys.keys())} 에 없습니다."
+            )
+        if active_refresh not in refresh_keys:
+            raise ValueError(
+                f"JWT_REFRESH_ACTIVE_KID={active_refresh!r} 가 등록된 refresh 키 "
+                f"{sorted(refresh_keys.keys())} 에 없습니다."
+            )
+
+        self._jwt_keys = access_keys
+        self._jwt_refresh_keys = refresh_keys
+        # 빈 문자열로 들어왔던 ACTIVE_KID 를 실제 결정값으로 덮어쓰기.
+        # frozen 모델이 아니므로 일반 setattr 가능.
+        if not self.JWT_ACTIVE_KID:
+            self.JWT_ACTIVE_KID = active
+        if not self.JWT_REFRESH_ACTIVE_KID:
+            self.JWT_REFRESH_ACTIVE_KID = active_refresh
+
+    @property
+    def jwt_keys(self) -> Dict[str, str]:
+        return self._jwt_keys
+
+    @property
+    def jwt_refresh_keys(self) -> Dict[str, str]:
+        return self._jwt_refresh_keys
 
 
 @lru_cache()
