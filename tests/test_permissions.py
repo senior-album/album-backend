@@ -442,3 +442,84 @@ async def test_has_permission_no_row_no_role_blocked(integration_db):
     fac = await _seed_facility(session)
     target = await _seed_user(session, email="t@x.io", role="staff", facility_id=fac.id)
     assert await has_permission(session, target, FACILITY_STATS_VIEW) is False
+
+
+# ---------------------------------------------------------------------------
+# GET /facility-permissions/me — 본인 권한 조회
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_my_permissions_requires_auth(integration_client):
+    resp = await integration_client.get("/facility-permissions/me")
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_my_permissions_admin_has_all_via_role(integration_client, integration_db):
+    _, session = integration_db
+    fac = await _seed_facility(session)
+    admin = await _seed_user(
+        session, email="a@x.io", role="staff", is_admin=True, facility_id=fac.id
+    )
+
+    resp = await integration_client.get(
+        "/facility-permissions/me", cookies=_cookies(admin)
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_all_via_role"] is True
+    assert body["permission_keys"] == []
+
+
+@pytest.mark.asyncio
+async def test_my_permissions_operator_has_all_via_role(integration_client, integration_db):
+    _, session = integration_db
+    op = await _seed_user(session, email="op@x.io", role="staff", is_operator=True)
+
+    resp = await integration_client.get(
+        "/facility-permissions/me", cookies=_cookies(op)
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_all_via_role"] is True
+
+
+@pytest.mark.asyncio
+async def test_my_permissions_staff_returns_explicit_keys(integration_client, integration_db):
+    _, session = integration_db
+    fac = await _seed_facility(session)
+    admin = await _seed_user(
+        session, email="a@x.io", role="staff", is_admin=True, facility_id=fac.id
+    )
+    target = await _seed_user(session, email="t@x.io", role="staff", facility_id=fac.id)
+
+    session.add(UserPermission(
+        user_id=target.id,
+        permission_key=FACILITY_STATS_VIEW,
+        granted_by=admin.id,
+    ))
+    await session.commit()
+
+    resp = await integration_client.get(
+        "/facility-permissions/me", cookies=_cookies(target)
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_all_via_role"] is False
+    assert body["permission_keys"] == [FACILITY_STATS_VIEW]
+
+
+@pytest.mark.asyncio
+async def test_my_permissions_staff_without_grants_returns_empty(integration_client, integration_db):
+    _, session = integration_db
+    fac = await _seed_facility(session)
+    target = await _seed_user(session, email="t@x.io", role="staff", facility_id=fac.id)
+
+    resp = await integration_client.get(
+        "/facility-permissions/me", cookies=_cookies(target)
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_all_via_role"] is False
+    assert body["permission_keys"] == []

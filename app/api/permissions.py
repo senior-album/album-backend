@@ -70,6 +70,18 @@ class GrantResponse(BaseModel):
     granted_at: datetime
 
 
+class MyPermissionsResponse(BaseModel):
+    """
+    현재 로그인 유저가 보유한 메뉴 권한.
+
+    `permission_keys` 는 명시적으로 부여된 행만 포함. 시설장(`is_admin`) /
+    운영자(`is_operator`) 는 키 행이 없어도 자동 통과하므로 프론트는
+    `has_all_via_role` 도 함께 봐야 한다.
+    """
+    permission_keys: list[str]
+    has_all_via_role: bool
+
+
 # ---- 공통 가드 ----
 
 
@@ -115,6 +127,35 @@ async def list_permission_keys(
         PermissionKeyOut(key=k, description=_KEY_DESCRIPTIONS.get(k, k))
         for k in sorted(ALL_PERMISSION_KEYS)
     ]
+
+
+@router.get("/me", response_model=MyPermissionsResponse)
+async def my_permissions(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MyPermissionsResponse:
+    """
+    현재 유저 본인이 보유한 메뉴 권한.
+
+    프론트엔드 useFacilityPermission hook 이 메뉴 가시성 결정용으로 호출.
+    별도 시설장 권한 불요 — 누구나 자기 권한 조회는 가능.
+    """
+    user = await db.get(User, current_user.get("user_id"))
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="계정이 비활성화되었거나 존재하지 않습니다.",
+        )
+
+    rows = (
+        await db.execute(
+            select(UserPermission.permission_key).where(UserPermission.user_id == user.id)
+        )
+    ).all()
+    keys = sorted({k for (k,) in rows})
+
+    has_all = bool(user.is_operator) or (bool(user.is_admin) and bool(user.facility_id))
+    return MyPermissionsResponse(permission_keys=keys, has_all_via_role=has_all)
 
 
 @router.get("/staff", response_model=StaffPermissionListResponse)
