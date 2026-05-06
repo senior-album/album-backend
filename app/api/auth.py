@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, and_, or_
+from sqlalchemy.exc import IntegrityError
 from passlib.context import CryptContext
 
 from app.core.config import get_settings
@@ -66,6 +67,23 @@ def verify_password(plain: str, hashed: str) -> bool:
 def generate_facility_code() -> str:
     """시설 코드 생성 (FAC-XXXXXX)"""
     return f"FAC-{uuid.uuid4().hex[:6].upper()}"
+
+
+# T-009/phone-otp 와 동일 메시지 — 클라이언트가 통일된 detail 로 분기 (claim 안내).
+_PHONE_DUP_DETAIL = "이미 다른 계정에 등록된 번호입니다."
+
+
+async def _ensure_phone_available(db: AsyncSession, phone: str | None) -> None:
+    """
+    회원가입 흐름의 phone 사전 검사. None/빈 값은 통과 (User.phone nullable).
+    이미 다른 활성 계정에 등록돼 있으면 409 — 동일 메시지로 phone-otp 의
+    claim 신고 흐름과 호환.
+    """
+    if not phone:
+        return
+    stmt = select(User.id).filter(User.phone == phone).limit(1)
+    if (await db.execute(stmt)).scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail=_PHONE_DUP_DETAIL)
 
 
 async def _issue_token_pair(
@@ -261,6 +279,8 @@ async def register_admin(request: RegisterAdminRequest, req: Request, db: AsyncS
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
 
+    await _ensure_phone_available(db, request.phone)
+
     # 시설 생성
     facility_id = str(uuid.uuid4())
     facility_code = generate_facility_code()
@@ -287,7 +307,12 @@ async def register_admin(request: RegisterAdminRequest, req: Request, db: AsyncS
         phone=request.phone,
     )
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        # pre-check 와 flush 사이의 race — phone-otp/verify 와 동일 정책 (409).
+        raise HTTPException(status_code=409, detail=_PHONE_DUP_DETAIL)
 
     family_id = str(uuid.uuid4())
     access_token, refresh_jwt = await _issue_token_pair(db, user, family_id, req)
@@ -330,6 +355,8 @@ async def register_staff(request: RegisterStaffRequest, req: Request, db: AsyncS
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
 
+    await _ensure_phone_available(db, request.phone)
+
     # 시설 코드로 시설 조회
     fac_stmt = select(Facility).filter(Facility.code == request.facilityCode)
     fac_result = await db.execute(fac_stmt)
@@ -350,7 +377,11 @@ async def register_staff(request: RegisterStaffRequest, req: Request, db: AsyncS
         phone=request.phone,
     )
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=_PHONE_DUP_DETAIL)
 
     family_id = str(uuid.uuid4())
     access_token, refresh_jwt = await _issue_token_pair(db, user, family_id, req)
@@ -449,6 +480,8 @@ async def register_guardian(request: RegisterGuardianRequest, req: Request, db: 
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
 
+    await _ensure_phone_available(db, request.phone)
+
     user_id = str(uuid.uuid4())
     user = User(
         id=user_id,
@@ -461,7 +494,11 @@ async def register_guardian(request: RegisterGuardianRequest, req: Request, db: 
         phone=request.phone,
     )
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=_PHONE_DUP_DETAIL)
 
     # T-020: 동의 검증 및 기록 — 필수 미동의 시 400
     await _validate_and_record_consents(db, user_id, request.consents, req)
