@@ -501,6 +501,38 @@ class ResidentWellnessLog(Base):
     )
 
 
+class Event(Base):
+    """T-243: 이벤트 캘린더 — 시설 직원이 입소자·시설 단위 일정을 등록.
+
+    type 어휘 (스키마 레이어 Literal 검증): `birthday` | `outing` | `other`.
+    resident_id 가 null 이면 시설 전체 행사 (예: 5월 야유회). non-null 이면
+    특정 입소자 이벤트 (예: 김철수 생신).
+    all_day=True 면 시간대 무관 (생신 등) — UI 가 시간 부분을 숨김.
+    end_at 는 nullable — 하루짜리 이벤트는 start_at 만으로 충분.
+
+    권한:
+      read  : 시설 직원 (자기 시설 모두) | 가디언 (자기 입소자 + 시설 전체) | 운영자
+      write : 시설 직원만 (자기 시설)
+
+    생신 자동 발급 (Resident.birth_date_ct decrypt cron) 은 T-243-3 후속.
+    """
+    __tablename__ = "events"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    facility_id = Column(String(36), ForeignKey("facilities.id"), nullable=False, index=True)
+    resident_id = Column(String(36), ForeignKey("residents.id"), nullable=True, index=True)
+    type = Column(String(20), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    start_at = Column(DateTime, nullable=False, index=True)
+    end_at = Column(DateTime, nullable=True)
+    all_day = Column(Boolean, default=True, nullable=False)
+
+    created_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PhoneClaimReport(Base):
     """
     "이 번호 내가 등록 안 했는데?" 신고. 휴대폰 OTP 인증 시 dup 충돌 (HTTP 409) 을

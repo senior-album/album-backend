@@ -393,6 +393,62 @@ class WellnessLogResponse(BaseModel):
         from_attributes = True
 
 
+# ==================== 이벤트 캘린더 스키마 (T-243) ====================
+
+# 시설마다 행사 종류가 갈리지만 백엔드는 분류 어휘만 고정. 각 어휘에 매핑되지
+# 않는 자유 행사는 `other` 로 분류 + free-text title/description 으로 표현.
+EventType = Literal["birthday", "outing", "other"]
+
+
+class EventBase(BaseModel):
+    """이벤트 공통 필드 (create/update 가 공유)."""
+    type: EventType
+    title: str
+    description: Optional[str] = None
+    start_at: datetime
+    end_at: Optional[datetime] = None
+    all_day: bool = True
+    resident_id: Optional[str] = None
+
+
+class EventCreate(EventBase):
+    """POST /facilities/{facility_id}/events 요청 본문."""
+    pass
+
+
+class EventUpdate(BaseModel):
+    """PATCH /events/{id} 부분 갱신 — 보낸 필드만 갱신.
+
+    facility_id 와 created_by 는 고정 — 변경하려면 새로 만들 것.
+    """
+    type: Optional[EventType] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    start_at: Optional[datetime] = None
+    end_at: Optional[datetime] = None
+    all_day: Optional[bool] = None
+    resident_id: Optional[str] = None
+
+
+class EventResponse(BaseModel):
+    """이벤트 응답."""
+    id: str
+    facility_id: str
+    resident_id: Optional[str] = None
+    type: str
+    title: str
+    description: Optional[str] = None
+    start_at: datetime
+    end_at: Optional[datetime] = None
+    all_day: bool
+    created_by: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 # ==================== 알림 관련 스키마 ====================
 
 class NotificationResponse(BaseModel):
