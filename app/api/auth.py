@@ -254,6 +254,8 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
         "facility_id": user.facility_id,
         "phone": user.phone,
         "is_active": user.is_active,
+        # T-056: 프론트가 미승인 staff 를 /pending-approval 로 redirect 하기 위함.
+        "is_staff_approved": user.is_staff_approved,
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
