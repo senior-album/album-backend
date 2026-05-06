@@ -254,6 +254,8 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
         "facility_id": user.facility_id,
         "phone": user.phone,
         "is_active": user.is_active,
+        # T-056: 프론트가 미승인 staff 를 /pending-approval 로 redirect 하기 위함.
+        "is_staff_approved": user.is_staff_approved,
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
@@ -305,6 +307,9 @@ async def register_admin(request: RegisterAdminRequest, req: Request, db: AsyncS
         is_admin=True,
         facility_id=facility_id,
         phone=request.phone,
+        # T-056: 시설을 본인이 만드는 admin 은 자기 자신 자동 승인.
+        is_staff_approved=True,
+        staff_approved_at=datetime.utcnow(),
     )
     db.add(user)
     try:
@@ -313,6 +318,9 @@ async def register_admin(request: RegisterAdminRequest, req: Request, db: AsyncS
         await db.rollback()
         # pre-check 와 flush 사이의 race — phone-otp/verify 와 동일 정책 (409).
         raise HTTPException(status_code=409, detail=_PHONE_DUP_DETAIL)
+
+    # 자기 자신 staff_approved_by 박음 — flush 후 PK 확정된 상태에서.
+    user.staff_approved_by = user.id
 
     family_id = str(uuid.uuid4())
     access_token, refresh_jwt = await _issue_token_pair(db, user, family_id, req)
@@ -375,6 +383,8 @@ async def register_staff(request: RegisterStaffRequest, req: Request, db: AsyncS
         is_admin=False,
         facility_id=facility.id,
         phone=request.phone,
+        # T-056: 시설장 승인 전엔 pending. verify_facility_access 가 차단.
+        is_staff_approved=False,
     )
     db.add(user)
     try:
@@ -386,8 +396,10 @@ async def register_staff(request: RegisterStaffRequest, req: Request, db: AsyncS
     family_id = str(uuid.uuid4())
     access_token, refresh_jwt = await _issue_token_pair(db, user, family_id, req)
 
-    logger.info(f"Staff registered: {request.email}, facility: {facility.name}")
+    logger.info(f"Staff registered (pending): {request.email}, facility: {facility.name}")
 
+    # T-056: pending 응답 — 프론트가 is_staff_approved=False 면 /pending-approval 로 redirect.
+    # 토큰은 발급해서 /auth/me 가 호출 가능하지만 verify_facility_access 가 데이터 API 를 차단.
     response = JSONResponse(content={
         "user": {
             "id": user_id,
@@ -398,6 +410,7 @@ async def register_staff(request: RegisterStaffRequest, req: Request, db: AsyncS
             "facility_id": facility.id,
             "phone": request.phone,
             "is_active": True,
+            "is_staff_approved": False,
             "created_at": user.created_at.isoformat() if user.created_at else None,
         },
         "facility": {
@@ -678,6 +691,8 @@ async def get_me(
             "facility_id": user.facility_id,
             "phone": user.phone,
             "is_active": user.is_active,
+            # T-056: pending staff 가 본인 상태 확인 가능. 프론트는 이 값으로 게이트.
+            "is_staff_approved": user.is_staff_approved,
             "created_at": user.created_at.isoformat() if user.created_at else None,
         },
         "facility": facility_data,

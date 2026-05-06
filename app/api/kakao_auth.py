@@ -6,6 +6,7 @@
 import uuid
 import secrets
 import logging
+from datetime import datetime
 import httpx
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
@@ -356,6 +357,10 @@ async def set_role_after_kakao(
         user.role = "staff"
         user.is_admin = True
         user.facility_id = facility_id
+        # T-056: 시설장 본인은 자기 자신 자동 승인.
+        user.is_staff_approved = True
+        user.staff_approved_by = user.id
+        user.staff_approved_at = datetime.utcnow()
 
     elif role == "staff":
         if not facility_code:
@@ -369,6 +374,8 @@ async def set_role_after_kakao(
 
         user.role = "staff"
         user.facility_id = facility.id
+        # T-056: 시설장 승인 전엔 pending — verify_facility_access 가 차단.
+        user.is_staff_approved = False
 
     elif role == "guardian":
         user.role = "guardian"

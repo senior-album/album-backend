@@ -63,6 +63,18 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # T-056: role=staff 승인 게이트. role=guardian 은 Guardian 모델 자체 is_approved 가 게이트라
+    # 본 컬럼은 의미 없음. role=operator/role=staff (admin) 도 의미 없지만 backfill 시 True 박는다.
+    is_staff_approved = Column(Boolean, default=False, nullable=False)
+    staff_approved_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    staff_approved_at = Column(DateTime, nullable=True)
+    # 거부는 soft delete — 같은 email/phone 으로 재신청 차단 (UNIQUE 제약이 자동 차단).
+    # is_active 와 함께 박혀서 로그인도 막힘.
+    is_rejected = Column(Boolean, default=False, nullable=False)
+    staff_rejected_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    staff_rejected_at = Column(DateTime, nullable=True)
+    staff_reject_reason = Column(String(500), nullable=True)
+
 
 class Resident(Base):
     __tablename__ = "residents"
@@ -295,6 +307,8 @@ class AdminAuditLog(Base):
     # photo_job_retry       : 운영자가 실패한 사진 처리 작업 재큐 (T-147)
     # permission_grant      : 시설 관리자가 직원에게 메뉴 권한 위임 (T-150)
     # permission_revoke     : 시설 관리자가 직원의 메뉴 권한 회수 (T-150)
+    # staff_approve         : 시설 관리자(또는 위임)가 신규 직원 가입 승인 (T-056)
+    # staff_reject          : 시설 관리자(또는 위임)가 신규 직원 가입 거부 (T-056, soft delete)
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     action = Column(String(50), nullable=False, index=True)
     performed_by = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
