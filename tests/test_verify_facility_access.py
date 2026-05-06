@@ -39,6 +39,8 @@ async def _make_user(session, *, facility_id: str | None, is_active: bool = True
         role="staff",
         facility_id=facility_id,
         is_active=is_active,
+        # T-056: verify_facility_access 가 미승인 staff 차단 — 기본 시드는 승인 완료 상태.
+        is_staff_approved=True,
     )
     session.add(u)
     await session.commit()

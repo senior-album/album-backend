@@ -115,6 +115,7 @@ async def _require_facility_admin(
 
 _KEY_DESCRIPTIONS: dict[str, str] = {
     "facility:stats:view": "시설 사용 지표 그래프 페이지 조회",
+    "facility:staff:approve": "신규 직원 가입 승인/거부",
 }
 
 

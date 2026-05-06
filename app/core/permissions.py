@@ -27,11 +27,13 @@ from app.core.security import get_current_user
 
 
 FACILITY_STATS_VIEW: Final[str] = "facility:stats:view"
+FACILITY_STAFF_APPROVE: Final[str] = "facility:staff:approve"
 
 
 # 위임 가능한 모든 키. grant API 와 require_permission 양쪽이 화이트리스트로 사용.
 ALL_PERMISSION_KEYS: Final[frozenset[str]] = frozenset({
     FACILITY_STATS_VIEW,
+    FACILITY_STAFF_APPROVE,
 })
 
 

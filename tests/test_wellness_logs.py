@@ -67,6 +67,8 @@ async def _seed_user(
         role=role,
         is_active=True,
         facility_id=facility_id,
+        # T-056: 미승인 staff 차단 가드 — 기본 시드는 승인 완료.
+        is_staff_approved=True,
     )
     session.add(u)
     await session.commit()
