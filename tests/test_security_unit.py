@@ -9,6 +9,7 @@ DB 가 필요 없는 순수 단위 테스트로 유지한다 — 통합 경로(�
 test_verify_facility_access.py 등에서 다룬다.
 """
 
+import os
 from datetime import datetime, timedelta
 
 import pytest
@@ -166,6 +167,217 @@ def test_generate_jti_random_and_url_safe():
     # token_urlsafe(32) → 43자 base64url (패딩 없음).
     assert len(a) >= 32
     assert all(c.isalnum() or c in "-_" for c in a)
+
+
+# ---------------------------------------------------------------------------
+# T-055 rolling key — kid 헤더 + 다중 키 lookup
+# ---------------------------------------------------------------------------
+
+
+def _reload_settings_with_env(monkeypatch, env: dict[str, str | None]):
+    """envvar 를 patch 한 뒤 `get_settings` cache 를 비워 재초기화시킨다.
+    None 값이면 envvar 삭제. 호출 후 반환되는 settings 인스턴스가 새 keyset 보유."""
+    for k, v in env.items():
+        if v is None:
+            monkeypatch.delenv(k, raising=False)
+        else:
+            monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+    return get_settings()
+
+
+def test_legacy_single_key_mode_produces_no_kid_header():
+    """기본(conftest) 환경 — JWT_SECRET 만 있으면 토큰 헤더에 kid 미포함."""
+    token = SecurityService.create_access_token({"sub": "u1"})
+    header = jwt.get_unverified_header(token)
+    assert "kid" not in header  # legacy 호환 — 운영 토큰 형태 변경 없음
+    payload = SecurityService.verify_token(token)
+    assert payload["sub"] == "u1"
+
+
+def test_active_kid_v1_embeds_kid_header_and_round_trips(monkeypatch):
+    settings = _reload_settings_with_env(
+        monkeypatch,
+        {
+            "JWT_KEY_V1": "kid-v1-secret-32bytes-padding-xxxxxxxxxxxxxx",
+            "JWT_ACTIVE_KID": "v1",
+        },
+    )
+    try:
+        assert settings.JWT_ACTIVE_KID == "v1"
+        assert "v1" in settings.jwt_keys
+
+        token = SecurityService.create_access_token({"sub": "u1"})
+        header = jwt.get_unverified_header(token)
+        assert header["kid"] == "v1"
+
+        payload = SecurityService.verify_token(token)
+        assert payload["sub"] == "u1"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_old_kid_token_still_verifies_during_rotation_grace(monkeypatch):
+    """v1 으로 발급된 토큰은 active 가 v2 로 바뀐 뒤에도 keyset 에 v1 이 남아있으면 검증 통과."""
+    # Phase 1: v1 만 등록 + active=v1 로 토큰 발급.
+    _reload_settings_with_env(
+        monkeypatch,
+        {
+            "JWT_KEY_V1": "kid-v1-secret-32bytes-padding-xxxxxxxxxxxxxx",
+            "JWT_ACTIVE_KID": "v1",
+        },
+    )
+    try:
+        old_token = SecurityService.create_access_token({"sub": "u-old"})
+
+        # Phase 2: v2 추가 + active=v2 로 전환. v1 은 grace 동안 유지.
+        _reload_settings_with_env(
+            monkeypatch,
+            {
+                "JWT_KEY_V1": "kid-v1-secret-32bytes-padding-xxxxxxxxxxxxxx",
+                "JWT_KEY_V2": "kid-v2-secret-32bytes-padding-yyyyyyyyyyyyyy",
+                "JWT_ACTIVE_KID": "v2",
+            },
+        )
+        # 옛 토큰 — v1 키로 자동 lookup 해서 검증 성공.
+        payload = SecurityService.verify_token(old_token)
+        assert payload["sub"] == "u-old"
+
+        # 새 토큰은 v2 헤더로 발급.
+        new_token = SecurityService.create_access_token({"sub": "u-new"})
+        assert jwt.get_unverified_header(new_token)["kid"] == "v2"
+        assert SecurityService.verify_token(new_token)["sub"] == "u-new"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_token_with_unknown_kid_is_rejected(monkeypatch):
+    """우리 keyset 에 없는 kid 헤더 토큰은 401 — 외부 도메인 토큰 위조 방어."""
+    settings = _reload_settings_with_env(
+        monkeypatch,
+        {
+            "JWT_KEY_V1": "kid-v1-secret-32bytes-padding-xxxxxxxxxxxxxx",
+            "JWT_ACTIVE_KID": "v1",
+        },
+    )
+    try:
+        # 'v99' kid 로 임의 키 서명 — keyset 에 없는 kid.
+        forged = jwt.encode(
+            {"sub": "attacker", "exp": datetime.utcnow() + timedelta(minutes=5)},
+            "any-secret",
+            algorithm=settings.JWT_ALGORITHM,
+            headers={"kid": "v99"},
+        )
+        with pytest.raises(HTTPException) as exc:
+            SecurityService.verify_token(forged)
+        assert exc.value.status_code == 401
+    finally:
+        get_settings.cache_clear()
+
+
+def test_token_after_legacy_purge_rejects_no_kid_tokens(monkeypatch):
+    """회전 완료 후 legacy 키 제거 → kid 없는 옛 토큰은 더 이상 검증 안 됨."""
+    # Phase 1: legacy 호환으로 발급된 토큰 (kid 헤더 없음).
+    legacy_token = SecurityService.create_access_token({"sub": "u-legacy"})
+    assert "kid" not in jwt.get_unverified_header(legacy_token)
+
+    # Phase 2: legacy 제거, v1 만 운영. JWT_SECRET 도 비움.
+    _reload_settings_with_env(
+        monkeypatch,
+        {
+            "JWT_SECRET": "",  # legacy 키 환경 제거
+            "JWT_KEY_V1": "kid-v1-secret-32bytes-padding-xxxxxxxxxxxxxx",
+            "JWT_ACTIVE_KID": "v1",
+        },
+    )
+    try:
+        with pytest.raises(HTTPException) as exc:
+            SecurityService.verify_token(legacy_token)
+        assert exc.value.status_code == 401
+    finally:
+        get_settings.cache_clear()
+
+
+def test_refresh_keyset_independent_from_access(monkeypatch):
+    """access 와 refresh 의 키셋은 완전 분리 — access 키로 발급된 refresh 시도는 401."""
+    _reload_settings_with_env(
+        monkeypatch,
+        {
+            "JWT_KEY_V1": "access-v1-secret-padding-xxxxxxxxxxxxxxxxxxxxxx",
+            "JWT_REFRESH_KEY_V1": "refresh-v1-secret-padding-yyyyyyyyyyyyyyyyy",
+            "JWT_ACTIVE_KID": "v1",
+            "JWT_REFRESH_ACTIVE_KID": "v1",
+        },
+    )
+    try:
+        # access 키로 위조된 refresh-shape 토큰 — refresh keyset 에 매칭되는 v1
+        # 키가 있어도 secret 자체가 다르므로 signature 매치 실패.
+        access_kid_v1 = "access-v1-secret-padding-xxxxxxxxxxxxxxxxxxxxxx"
+        forged_refresh = jwt.encode(
+            {
+                "sub": "u1",
+                "jti": "x",
+                "type": "refresh",
+                "exp": datetime.utcnow() + timedelta(minutes=5),
+            },
+            access_kid_v1,
+            algorithm=get_settings().JWT_ALGORITHM,
+            headers={"kid": "v1"},
+        )
+        with pytest.raises(HTTPException) as exc:
+            SecurityService.verify_refresh_token(forged_refresh)
+        assert exc.value.status_code == 401
+    finally:
+        get_settings.cache_clear()
+
+
+def test_refresh_token_round_trip_with_active_kid(monkeypatch):
+    _reload_settings_with_env(
+        monkeypatch,
+        {
+            "JWT_REFRESH_KEY_V1": "refresh-v1-secret-padding-yyyyyyyyyyyyyyyyy",
+            "JWT_REFRESH_ACTIVE_KID": "v1",
+        },
+    )
+    try:
+        token, _exp = SecurityService.create_refresh_token("u-1", "jti-1")
+        header = jwt.get_unverified_header(token)
+        assert header["kid"] == "v1"
+
+        payload = SecurityService.verify_refresh_token(token)
+        assert payload["sub"] == "u-1"
+        assert payload["jti"] == "jti-1"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_settings_fail_when_active_kid_not_in_keyset(monkeypatch):
+    """타이포 등으로 ACTIVE_KID 가 keyset 과 어긋나면 부트 실패."""
+    monkeypatch.setenv("JWT_KEY_V1", "kid-v1-secret-padding-xxxxxxxxxxxxxxx")
+    monkeypatch.setenv("JWT_ACTIVE_KID", "v9")  # keyset 에 없음
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="JWT_ACTIVE_KID"):
+            get_settings()
+    finally:
+        # 다음 테스트 격리 — conftest 의 JWT_SECRET 시드로 복구되도록 클리어.
+        get_settings.cache_clear()
+
+
+def test_settings_fail_when_no_keys_provided(monkeypatch):
+    """access 키 envvar 가 하나도 없으면 부트 시 ValueError. .env 파일은
+    pydantic-settings 폴백 경로이므로 `_env_file=None` 으로 직접 차단해야
+    로컬 dev 의 `.env` (JWT_SECRET 포함) 영향 없이 검증 가능."""
+    from app.core.config import Settings
+
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    for k in list(os.environ.keys()):
+        if k.startswith("JWT_KEY_"):
+            monkeypatch.delenv(k, raising=False)
+
+    with pytest.raises(ValueError, match="Access JWT 키"):
+        Settings(_env_file=None)
 
 
 # ---------------------------------------------------------------------------

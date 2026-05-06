@@ -57,32 +57,37 @@ pre-commit install
 - **직원 이탈 시**: rotation 권장 (특히 JWT — 유효한 세션 전체 무효화)
 - **정기**: 알파 단계에서는 연 1회 또는 incident 기반. 베타 전환 시 90일 주기 도입 검토.
 
-### 내부 시크릿 (JWT / DB / MinIO)
+### JWT 키 회전 (T-055 rolling key)
+
+T-055 이후 JWT 회전은 **재로그인 없이** 진행 가능하다. 토큰 헤더의 `kid` 로
+키 lookup 하므로 옛 토큰과 새 토큰이 한 동안 공존할 수 있다. 자세한 절차는
+`album-deploy/docs/JWT_KEY_ROTATION.md` 참고. 요약:
+
+1. **새 kid 추가**: `JWT_KEY_V<N+1>` / `JWT_REFRESH_KEY_V<N+1>` 추가, ACTIVE
+   는 아직 V<N> 유지 → 모든 backend pod 가 새 키 인식하지만 발급은 옛 키.
+2. **활성 kid 전환**: `JWT_ACTIVE_KID=v<N+1>` / `JWT_REFRESH_ACTIVE_KID=v<N+1>`
+   → 신규 발급 토큰부터 새 kid. 옛 kid 토큰은 검증 keyset 에 남아있어 그대로 유효.
+3. **Grace 대기**: refresh 만료(14일) + access 만료(60분) 기다림.
+4. **옛 kid 제거**: `JWT_KEY_V<N>` / `JWT_REFRESH_KEY_V<N>` SealedSecret 에서 삭제.
+
+### 그 외 내부 시크릿 (DB / MinIO)
 
 ```bash
 # 1. 새 값 생성
-python -c "import secrets; print(secrets.token_urlsafe(48))"  # JWT_SECRET
-python -c "import secrets; print(secrets.token_urlsafe(48))"  # JWT_REFRESH_SECRET
 openssl rand -base64 32                                       # POSTGRES_PASSWORD
 # MinIO 키: mc admin user add myminio <new-access-key> <new-secret-key>
 
-# 2. SealedSecret 재생성 (album-deploy 레포에서)
+# 2. SealedSecret 재생성 (album-deploy 레포에서) — 변경할 키만 새 값으로,
+# 나머지는 기존 값 그대로 유지하기 위해 항목별 reseal 권장.
 cd album-deploy
-kubectl create secret generic backend-secret \
-  --namespace=senior-album \
-  --from-literal=JWT_SECRET="$NEW_JWT" \
-  --from-literal=JWT_REFRESH_SECRET="$NEW_JWT_REFRESH" \
-  --from-literal=POSTGRES_PASSWORD="$NEW_DB_PASS" \
-  --from-literal=MINIO_ACCESS_KEY="$NEW_MINIO_KEY" \
-  --from-literal=MINIO_SECRET_KEY="$NEW_MINIO_SECRET" \
-  --from-literal=KAKAO_CLIENT_ID="$KAKAO_ID" \
-  --from-literal=KAKAO_CLIENT_SECRET="$KAKAO_SECRET" \
-  --dry-run=client -o yaml \
-| kubeseal --format yaml > k8s/sealed/backend-secret.yaml
+echo -n "$NEW_DB_PASS" | kubectl create secret generic backend-secret \
+  --namespace=senior-album --dry-run=client \
+  --from-file=POSTGRES_PASSWORD=/dev/stdin -o yaml \
+  | kubeseal --format yaml --merge-into k8s/sealed/backend-secret.yaml
 
 # 3. 커밋 + push → GitOps 가 apply
 git add k8s/sealed/backend-secret.yaml
-git commit -m "chore(secret): rotate backend-secret"
+git commit -m "chore(secret): rotate POSTGRES_PASSWORD"
 git push
 
 # 4. 롤아웃 트리거 (SealedSecret 변경은 Pod 재시작 안 시키므로 수동)
@@ -100,7 +105,7 @@ kubectl -n senior-album rollout restart statefulset/postgres  # DB 비번 바뀐
 먼저 죽이면 다운타임 발생.
 
 ### Rotation 후 체크리스트
-- [ ] 앱 로그에 auth 오류 없는지 (JWT 는 기존 토큰이 invalid 됨 — 사용자 재로그인 필요)
+- [ ] 앱 로그에 auth 오류 없는지 (JWT 회전은 T-055 rolling key 로 재로그인 불요. 다른 시크릿 회전은 해당 서비스 재기동 후 정상 동작 확인)
 - [ ] 카카오 로그인 정상 동작
 - [ ] 사진 업로드 (MinIO) 정상
 - [ ] DB 연결 정상 (`/health` 200)
