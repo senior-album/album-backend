@@ -14,7 +14,7 @@ from app.core.config import get_settings
 from app.core.database import Database
 from app.core.logging_config import configure_logging
 from app.core.redis import get_redis, close_redis
-from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp, consents, legal, admin, support, users, notifications, wellness_logs, permissions
+from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp, consents, legal, admin, support, users, notifications, wellness_logs, permissions, events
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -220,6 +220,7 @@ app.include_router(users.router)
 app.include_router(notifications.router)
 app.include_router(wellness_logs.router)
 app.include_router(permissions.router)
+app.include_router(events.router)
 
 
 # 헬스 체크 엔드포인트
