@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     OPENSEARCH_CA_CERT_PATH: str = ""  # PEM 파일 경로. VERIFY_CERTS=true 시 필요
     OPENSEARCH_USER: str = ""  # security 플러그인 활성 시
     OPENSEARCH_PASSWORD: str = ""  # security 플러그인 활성 시
+    # T-004e: face_embeddings.resident_id_hash 산출용 HMAC-SHA256 키.
+    # SealedSecret backend-secret 에 박힌 ~40 자 ASCII 랜덤 (T-004e1 부트스트랩
+    # 스크립트가 `openssl rand -base64 32 | tr -d '+/=' | head -c 40` 로 생성).
+    # backend 만 보유 → OpenSearch dump 단독 유출 시 vector ↔ resident 식별
+    # 연결고리 끊김 (spec §8). e2 시점엔 빈 값이면 hash 계산이 fail → 즉시 발견.
+    OPENSEARCH_LINK_KEY: str = ""
 
     # 카카오 OAuth
     KAKAO_CLIENT_ID: str = ""

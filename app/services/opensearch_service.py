@@ -3,6 +3,8 @@ OpenSearch 서비스
 얼굴 임베딩 벡터 저장 및 유사도 검색 (kNN)
 """
 
+import hashlib
+import hmac
 import logging
 from typing import Optional, List, Tuple
 from opensearchpy import OpenSearch
@@ -23,11 +25,68 @@ MAX_KNN_K = 100
 RECLASSIFY_BATCH_SIZE = 200
 RECLASSIFY_MAX_TOTAL = 5000
 
+# T-004e: 마이그레이션 scroll 페이지 사이즈. RECLASSIFY 보다 크게 잡아도 안전 —
+# embedding 필드를 안 가져오기 때문에 페이로드가 작음. 596 docs 가정 시 1 페이지로 끝남.
+MIGRATE_SCROLL_PAGE_SIZE = 500
+MIGRATE_MAX_TOTAL = 100_000
+
+
+def _resolve_resident_id_from_hit(hit_source: dict) -> Optional[str]:
+    """T-004e2: search hit 의 _source 에서 resident_id 를 결정한다.
+
+    dual-read 정책:
+      1) `resident_id_hash` 가 있고 hash→rid 역매핑 캐시에 있으면 그걸 사용.
+      2) 없으면 옛 평문 `resident_id` 로 fallback.
+      3) 둘 다 없거나 비어있으면 None.
+
+    e2 시점엔 OpenSearchService._hash_to_rid 캐시가 비어있어 (1) 은 미스됨.
+    → 항상 (2) 평문으로 fallback. 캐시 wiring 은 e4 에서 lifespan + residents
+    create/restore 훅으로 채울 예정. e2 에선 dual-write 가 hash 를 채우고,
+    migrate_resident_id_to_hash 가 옛 docs 의 hash 를 backfill 한다.
+    """
+    rid_hash = hit_source.get("resident_id_hash")
+    if rid_hash:
+        cache = OpenSearchService._hash_to_rid
+        if rid_hash in cache:
+            return cache[rid_hash]
+    rid = hit_source.get("resident_id")
+    if rid is not None:
+        return rid
+    return None
+
+
+def hash_resident_id(rid: str) -> str:
+    """T-004e: HMAC-SHA256(OPENSEARCH_LINK_KEY, rid) 의 hex digest.
+
+    OPENSEARCH_LINK_KEY 는 backend-secret 에서만 노출되므로, OpenSearch dump
+    단독 유출 시 vector 와 hash 만 노출돼서 어떤 vector 가 누구 얼굴인지
+    식별 불가 (spec §8 / KISA compensating control).
+
+    빈 문자열도 결정적으로 해시됨 — 미분류(resident_id="") 표시는 hash 로도
+    동일하게 식별 가능. 키 미설정 시 명시적으로 RuntimeError — 무음 fallback 은
+    안전성 약화이므로 즉시 fail-fast.
+    """
+    settings = get_settings()
+    key = settings.OPENSEARCH_LINK_KEY
+    if not key:
+        raise RuntimeError(
+            "OPENSEARCH_LINK_KEY 가 설정되지 않았습니다. "
+            "T-004e1 의 SealedSecret 봉인 또는 .env 의 OPENSEARCH_LINK_KEY 를 확인하세요."
+        )
+    return hmac.new(
+        key.encode("utf-8"), rid.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
 
 class OpenSearchService:
     """OpenSearch 얼굴 임베딩 저장/검색 서비스"""
 
     _client: Optional[OpenSearch] = None
+    # T-004e2: hash(resident_id_hash) → resident_id 역매핑 캐시.
+    # e2 시점엔 비어있고 _resolve_resident_id_from_hit 이 평문 rid 로 fallback.
+    # e4 에서 lifespan startup hook 이 residents 테이블을 enumerate 해서 채우게 됨.
+    # 신규 resident 가 추가되면 별도 update API 로 한 줄씩 갱신 (예정).
+    _hash_to_rid: dict = {}
 
     @classmethod
     def get_client(cls) -> OpenSearch:
@@ -120,6 +179,10 @@ class OpenSearchService:
             "mappings": {
                 "properties": {
                     "resident_id": {"type": "keyword"},
+                    # T-004e: HMAC(OPENSEARCH_LINK_KEY, resident_id) hex digest.
+                    # e2 에서 신규 인덱싱은 dual-write, 기존 docs 는 admin
+                    # migrate-resident-id-hash 엔드포인트가 backfill.
+                    "resident_id_hash": {"type": "keyword"},
                     "facility_id": {"type": "keyword"},
                     "photo_id": {"type": "keyword"},
                     "face_id": {"type": "keyword"},
@@ -157,11 +220,16 @@ class OpenSearchService:
         photo_url: Optional[str] = None,
         is_reference: bool = False,
     ) -> str:
-        """임베딩 벡터를 OpenSearch에 저장"""
+        """임베딩 벡터를 OpenSearch에 저장.
+
+        T-004e2: dual-write — 평문 `resident_id` 와 함께 `resident_id_hash` 도 색인.
+        e4 에서 평문 필드를 제거할 때까지 두 필드 모두 유지된다.
+        """
         client = cls.get_client()
 
         doc = {
             "resident_id": resident_id,
+            "resident_id_hash": hash_resident_id(resident_id),
             "facility_id": facility_id,
             "photo_id": photo_id,
             "face_id": face_id,
@@ -266,7 +334,12 @@ class OpenSearchService:
             results = []
             for hit in hits:
                 score = hit["_score"]
-                rid = hit["_source"]["resident_id"]
+                rid = _resolve_resident_id_from_hit(hit["_source"])
+                if rid is None:
+                    logger.warning(
+                        f"  Hit skipped — neither resident_id nor resolvable resident_id_hash: {hit.get('_id')}"
+                    )
+                    continue
                 logger.info(f"  Hit: resident_id={rid}, score={score}")
 
                 # Lucene cosinesimil score = (1 + cosine_similarity) / 2
@@ -312,7 +385,12 @@ class OpenSearchService:
                     # script_score returns cosine_sim + 1.0, so range [0, 2]
                     raw_score = hit["_score"]
                     cosine_sim = raw_score - 1.0  # range [-1, 1]
-                    rid = hit["_source"]["resident_id"]
+                    rid = _resolve_resident_id_from_hit(hit["_source"])
+                    if rid is None:
+                        logger.warning(
+                            f"  Fallback hit skipped — no resolvable resident_id: {hit.get('_id')}"
+                        )
+                        continue
                     logger.info(f"  Fallback hit: resident_id={rid}, raw_score={raw_score}, cosine_sim={cosine_sim}")
 
                     if cosine_sim >= threshold:
@@ -374,12 +452,23 @@ class OpenSearchService:
 
     @classmethod
     def delete_resident_embeddings(cls, resident_id: str):
-        """입소자의 모든 임베딩 삭제"""
+        """입소자의 모든 임베딩 삭제.
+
+        T-004e2: 평문 `resident_id` 또는 `resident_id_hash` 둘 중 하나만 가지고
+        있는 docs 도 모두 잡히도록 OR query. 마이그 직후 등 한쪽이 없는 docs 가
+        존재할 수 있는 transition 윈도우 대비.
+        """
         client = cls.get_client()
 
         query = {
             "query": {
-                "term": {"resident_id": resident_id}
+                "bool": {
+                    "should": [
+                        {"term": {"resident_id": resident_id}},
+                        {"term": {"resident_id_hash": hash_resident_id(resident_id)}},
+                    ],
+                    "minimum_should_match": 1,
+                }
             }
         }
 
@@ -501,7 +590,12 @@ class OpenSearchService:
                     "_op_type": "update",
                     "_index": FACE_INDEX,
                     "_id": doc_id,
-                    "doc": {"resident_id": new_resident_id},
+                    # T-004e2: dual-write — hash 도 같이 set 해서
+                    # transition 동안에도 hash 인덱스가 일관되게 유지됨.
+                    "doc": {
+                        "resident_id": new_resident_id,
+                        "resident_id_hash": hash_resident_id(new_resident_id),
+                    },
                 })
                 matched.append({
                     "photo_id": photo_id,
@@ -524,6 +618,113 @@ class OpenSearchService:
 
         logger.info(f"Reclassify: {len(matched)} photos matched to resident {new_resident_id}")
         return matched
+
+    @classmethod
+    def migrate_resident_id_to_hash(
+        cls,
+        facility_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """T-004e3: 옛 docs 의 `resident_id_hash` 필드를 평문 `resident_id` 로부터
+        backfill 한다. e2 머지 + 이미지 배포 후 운영자가 1 회 호출.
+
+        흐름:
+          1) `resident_id` 가 있으면서 `resident_id_hash` 가 비어있는 docs 를
+             페이지네이션으로 수집 (facility 필터 옵션 — 단계 배포 시 시설별 검증).
+          2) 각 doc 의 평문 rid 로 hash 계산 → bulk update.
+          3) dry_run=True 면 update 없이 카운트만 반환.
+
+        반환:
+            {
+              "scanned": int,    # 검사한 docs 수
+              "to_update": int,  # hash 가 비어있어 backfill 대상이 된 docs
+              "updated": int,    # 실제 bulk 업데이트 성공 docs (dry_run 이면 0)
+              "errors": int,     # bulk 업데이트 중 실패한 docs
+              "capped": bool,    # MIGRATE_MAX_TOTAL 에 걸렸는지
+            }
+        """
+        client = cls.get_client()
+
+        must: list = [
+            {"exists": {"field": "resident_id"}},
+        ]
+        must_not: list = [
+            {"exists": {"field": "resident_id_hash"}},
+        ]
+        if facility_id is not None:
+            must.append({"term": {"facility_id": facility_id}})
+
+        query_body = {
+            "query": {"bool": {"must": must, "must_not": must_not}},
+            "_source": ["resident_id"],
+        }
+
+        scanned = 0
+        actions: list = []
+        capped = False
+        from_offset = 0
+        while from_offset < MIGRATE_MAX_TOTAL:
+            page_size = min(MIGRATE_SCROLL_PAGE_SIZE, MIGRATE_MAX_TOTAL - from_offset)
+            page_query = {"size": page_size, "from": from_offset, **query_body}
+            try:
+                response = client.search(index=FACE_INDEX, body=page_query)
+            except Exception as e:
+                logger.error(f"migrate_resident_id_to_hash: search failed at from={from_offset}: {e}")
+                break
+            hits = response["hits"]["hits"]
+            if not hits:
+                break
+
+            for hit in hits:
+                scanned += 1
+                doc_id = hit["_id"]
+                rid = hit["_source"].get("resident_id")
+                if rid is None:
+                    # 위 query 가 must=exists 인데도 들어오는 경우는 거의 없지만 방어적 skip
+                    continue
+                actions.append({
+                    "_op_type": "update",
+                    "_index": FACE_INDEX,
+                    "_id": doc_id,
+                    "doc": {"resident_id_hash": hash_resident_id(rid)},
+                })
+
+            if len(hits) < page_size:
+                break
+            from_offset += len(hits)
+            if from_offset >= MIGRATE_MAX_TOTAL:
+                capped = True
+                logger.warning(
+                    f"migrate_resident_id_to_hash: hit MIGRATE_MAX_TOTAL={MIGRATE_MAX_TOTAL}. "
+                    "남은 docs 는 다음 호출로 처리. (facility 필터 권장)"
+                )
+
+        to_update = len(actions)
+        updated = 0
+        errors = 0
+
+        if actions and not dry_run:
+            try:
+                success, errs = bulk(client, actions, raise_on_error=False)
+                updated = success
+                errors = len(errs) if isinstance(errs, list) else 0
+                if errors:
+                    logger.warning(
+                        f"migrate_resident_id_to_hash: bulk had {errors} errors out of {to_update}"
+                    )
+                else:
+                    logger.info(f"migrate_resident_id_to_hash: bulk updated {updated} docs")
+            except Exception as e:
+                logger.error(f"migrate_resident_id_to_hash: bulk failed: {e}")
+                errors = to_update
+
+        return {
+            "scanned": scanned,
+            "to_update": to_update,
+            "updated": updated,
+            "errors": errors,
+            "capped": capped,
+        }
 
 
 def get_opensearch() -> OpenSearchService:
