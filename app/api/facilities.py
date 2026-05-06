@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.residents import apply_pii_decryption
 from app.core.database import get_db
 from app.core.redis import check_rate_limit
+from app.core.permissions import FACILITY_STATS_VIEW, require_permission
 from app.core.security import get_current_user, get_current_staff
 from app.models.models import (
     Facility,
@@ -24,6 +25,7 @@ from app.models.models import (
     Photo,
     PhotoResident,
     PhotoLike,
+    PhotoProcessingJob,
     Guardian,
     Invitation,
 )
@@ -514,3 +516,150 @@ async def get_facility_stats(
         "photosUnprocessed": photos_unprocessed,
         "residentsWithoutFace": residents_without_face,
     }
+
+
+# ===========================================================================
+# T-143: 시설 사용 지표 트렌드 그래프
+# ===========================================================================
+
+
+def _month_buckets(months: int, now: Optional[datetime] = None) -> list[tuple[datetime, datetime]]:
+    """
+    오늘 기준 과거 N 개월의 (start, end) 튜플 리스트 — start 가 오래된 순.
+
+    각 버킷은 [start_of_month, start_of_next_month). 현재 진행 중인 월도 포함
+    (end 는 미래 시점이지만 created_at 비교는 자연스럽게 동작).
+    """
+    now = now or datetime.utcnow()
+    # 현재 월의 시작
+    cur_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    starts: list[datetime] = []
+    s = cur_start
+    for _ in range(months):
+        starts.append(s)
+        # 이전 달 1일
+        if s.month == 1:
+            s = s.replace(year=s.year - 1, month=12)
+        else:
+            s = s.replace(month=s.month - 1)
+    starts.reverse()  # 오래된 → 최근
+
+    buckets: list[tuple[datetime, datetime]] = []
+    for i, st in enumerate(starts):
+        if i + 1 < len(starts):
+            en = starts[i + 1]
+        else:
+            # 마지막 버킷 = 다음 달 시작
+            if st.month == 12:
+                en = st.replace(year=st.year + 1, month=1)
+            else:
+                en = st.replace(month=st.month + 1)
+        buckets.append((st, en))
+    return buckets
+
+
+_RANGE_MONTHS = {"3m": 3, "6m": 6, "12m": 12}
+
+
+@router.get("/{facility_id}/stats/trends")
+async def get_facility_stats_trends(
+    facility_id: str,
+    range: str = Query("6m", description="3m | 6m | 12m"),
+    current_user: dict = Depends(require_permission(FACILITY_STATS_VIEW)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    시설 사용 지표 월별 시계열.
+
+    T-143: 자체 메일 인프라 부담을 줄이기 위해 메일 발송 대신 인앱 그래프.
+    T-150 의 `facility:stats:view` 게이트 하위 — 시설장 / 운영자 / 위임 받은 직원.
+
+    facility_id 매칭은 require_permission 이 검증하지 않으므로 여기서 추가:
+    호출자가 운영자가 아니라면 자기 시설의 통계만 볼 수 있다.
+    """
+    months = _RANGE_MONTHS.get(range)
+    if months is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="range 는 3m / 6m / 12m 중 하나여야 합니다.",
+        )
+
+    facility_id = await _resolve_facility_id(facility_id, db)
+    fac = await db.get(Facility, facility_id)
+    if fac is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="시설을 찾을 수 없습니다.")
+
+    user = await db.get(User, current_user.get("user_id"))
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="유효하지 않은 인증 컨텍스트입니다.")
+    if not user.is_operator and user.facility_id != facility_id:
+        # 운영자는 모든 시설 가능, 그 외 시설장·위임 직원은 자기 시설만.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="해당 시설의 통계를 볼 권한이 없습니다.",
+        )
+
+    buckets = _month_buckets(months)
+
+    items: list[dict] = []
+    for start, end in buckets:
+        # 사진 업로드 / 분류
+        photos_uploaded = (
+            await db.execute(
+                select(func.count(Photo.id)).where(
+                    Photo.facility_id == facility_id,
+                    Photo.created_at >= start,
+                    Photo.created_at < end,
+                )
+            )
+        ).scalar() or 0
+        photos_classified = (
+            await db.execute(
+                select(func.count(Photo.id)).where(
+                    Photo.facility_id == facility_id,
+                    Photo.created_at >= start,
+                    Photo.created_at < end,
+                    Photo.is_processed == True,  # noqa: E712
+                )
+            )
+        ).scalar() or 0
+        matching_rate = round(photos_classified / photos_uploaded * 100, 1) if photos_uploaded else 0.0
+
+        # 활성 보호자 — 해당 월 PhotoLike 한 distinct user_id (가벼운 활동 신호)
+        # 백엔드에 별도 "보호자 로그인" 추적이 없어 좋아요를 활동 proxy 로 사용.
+        active_guardians_subq = (
+            select(PhotoLike.user_id)
+            .join(Photo, Photo.id == PhotoLike.photo_id)
+            .where(
+                Photo.facility_id == facility_id,
+                PhotoLike.created_at >= start,
+                PhotoLike.created_at < end,
+            )
+            .distinct()
+            .subquery()
+        )
+        active_guardians = (
+            await db.execute(select(func.count()).select_from(active_guardians_subq))
+        ).scalar() or 0
+
+        # 미처리 사진 누적 (월말 기준) — pending / failed 사진 처리 작업
+        unprocessed_eom = (
+            await db.execute(
+                select(func.count(PhotoProcessingJob.id)).where(
+                    PhotoProcessingJob.facility_id == facility_id,
+                    PhotoProcessingJob.status.in_(("pending", "failed")),
+                    PhotoProcessingJob.created_at < end,
+                )
+            )
+        ).scalar() or 0
+
+        items.append({
+            "month": start.strftime("%Y-%m"),
+            "photos_uploaded": int(photos_uploaded),
+            "photos_classified": int(photos_classified),
+            "matching_rate": matching_rate,
+            "active_guardians": int(active_guardians),
+            "photos_unprocessed_eom": int(unprocessed_eom),
+        })
+
+    return {"facility_id": facility_id, "range": range, "items": items}
