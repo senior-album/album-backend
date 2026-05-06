@@ -60,9 +60,6 @@ class Settings(BaseSettings):
     MINIO_USE_SSL: bool = False
     MINIO_EXTERNAL_ENDPOINT: str = ""  # 외부 접근용 (presigned URL), 비어있으면 MINIO_ENDPOINT 사용
 
-    # 사진 로컬 저장 (MinIO 없을 때 fallback)
-    UPLOAD_DIR: str = "./uploads"
-
     # 얼굴 인식
     FACE_SIMILARITY_THRESHOLD: float = 0.6
     FACE_DETECTION_CONFIDENCE: float = 0.9

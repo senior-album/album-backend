@@ -3,14 +3,12 @@ FastAPI 메인 애플리케이션
 라우터 등록, 미들웨어 설정, 라이프사이클 관리
 """
 
-import os
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_settings
 from app.core.database import Database
@@ -222,12 +220,6 @@ app.include_router(users.router)
 app.include_router(notifications.router)
 app.include_router(wellness_logs.router)
 app.include_router(permissions.router)
-
-
-# 로컬 업로드 디렉토리 정적 파일 서빙
-upload_dir = os.path.join(os.getcwd(), "uploads")
-os.makedirs(upload_dir, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
 
 
 # 헬스 체크 엔드포인트

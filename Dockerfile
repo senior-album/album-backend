@@ -47,8 +47,6 @@ app = FaceAnalysis(name='buffalo_l', root='/app/models'); \
 app.prepare(ctx_id=-1, det_size=(640,640)); \
 print('Model downloaded successfully')"
 
-RUN mkdir -p /app/uploads
-
 RUN useradd -m -s /bin/bash appuser && chown -R appuser:appuser /app
 USER appuser
 
