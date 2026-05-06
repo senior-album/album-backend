@@ -19,6 +19,8 @@ _os.environ.setdefault("JWT_SECRET", "test-secret-value-for-jwt-32-bytes-min")
 _os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret-32bytes-minimum")
 _os.environ.setdefault("RESIDENT_PII_KEK", "0" * 64)
 _os.environ.setdefault("RESIDENT_NAME_HMAC_KEY", "1" * 64)
+# T-004e2: hash_resident_id 가 사용. 테스트용 결정적 키.
+_os.environ.setdefault("OPENSEARCH_LINK_KEY", "t004e2-test-link-key-deterministic-aaaa")
 
 from typing import Any
 
@@ -32,6 +34,7 @@ from app.services.opensearch_service import (
     OpenSearchService,
     RECLASSIFY_BATCH_SIZE,
     RECLASSIFY_MAX_TOTAL,
+    hash_resident_id,
 )
 
 
@@ -280,12 +283,18 @@ def test_delete_embedding_calls_client_delete(monkeypatch):
     assert fake.deleted_ids == [(FACE_INDEX, "d1")]
 
 
-def test_delete_resident_embeddings_uses_term_query(monkeypatch):
+def test_delete_resident_embeddings_uses_dual_query(monkeypatch):
+    """T-004e2: 평문 resident_id OR resident_id_hash 둘 다 매칭하도록 bool/should."""
     fake = _install_client(monkeypatch, _FakeClient())
     OpenSearchService.delete_resident_embeddings("r-1")
     assert len(fake.delete_by_query_calls) == 1
     _, body = fake.delete_by_query_calls[0]
-    assert body == {"query": {"term": {"resident_id": "r-1"}}}
+    bool_query = body["query"]["bool"]
+    assert bool_query["minimum_should_match"] == 1
+    should = bool_query["should"]
+    assert {"term": {"resident_id": "r-1"}} in should
+    expected_hash = hash_resident_id("r-1")
+    assert {"term": {"resident_id_hash": expected_hash}} in should
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +368,11 @@ def test_reclassify_matches_above_threshold(monkeypatch):
     assert rids == ["aligned"]
     # bulk 업데이트도 호출되었는지
     assert len(bulk_calls) == 1 and len(bulk_calls[0]) == 1
-    assert bulk_calls[0][0]["doc"] == {"resident_id": "r-new"}
+    # T-004e2 dual-write — resident_id 와 resident_id_hash 둘 다 set
+    assert bulk_calls[0][0]["doc"] == {
+        "resident_id": "r-new",
+        "resident_id_hash": hash_resident_id("r-new"),
+    }
 
 
 def test_reclassify_skips_zero_norm_face_embeddings(monkeypatch):
@@ -576,6 +589,255 @@ def test_get_client_ssl_with_ca_cert_and_basic_auth(monkeypatch):
     assert factory.captured["http_auth"] == ("admin", "s3cret")
     # verify_certs=True 면 ssl_show_warn 은 안 들어가도 됨 (의미 없는 경고 안 남)
     assert "ssl_show_warn" not in factory.captured
+
+
+# ---------------------------------------------------------------------------
+# T-004e2: hash_resident_id + dual-write/dual-read
+# ---------------------------------------------------------------------------
+
+
+def test_hash_resident_id_is_deterministic_and_distinct():
+    """같은 rid → 같은 hash, 다른 rid → 다른 hash, 빈 문자열도 결정적."""
+    h1 = hash_resident_id("r-1")
+    h2 = hash_resident_id("r-1")
+    h3 = hash_resident_id("r-2")
+    assert h1 == h2
+    assert h1 != h3
+    # SHA-256 hex digest 는 64 chars
+    assert len(h1) == 64
+    # 빈 문자열 — 미분류 표시 — 도 결정적
+    e1 = hash_resident_id("")
+    e2 = hash_resident_id("")
+    assert e1 == e2
+    assert e1 != h1
+
+
+def test_hash_resident_id_raises_when_key_missing(monkeypatch):
+    """T-004e2: OPENSEARCH_LINK_KEY 미설정 시 fail-fast (무음 fallback 안 됨)."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "OPENSEARCH_LINK_KEY", "")
+    with pytest.raises(RuntimeError, match="OPENSEARCH_LINK_KEY"):
+        hash_resident_id("r-1")
+
+
+def test_store_embedding_dual_writes_resident_id_hash(monkeypatch):
+    """T-004e2: store_embedding 은 평문 resident_id 와 resident_id_hash 둘 다 색인."""
+    fake = _install_client(monkeypatch, _FakeClient())
+    OpenSearchService.store_embedding(
+        doc_id="d1",
+        embedding=[0.1, 0.2, 0.3],
+        resident_id="r-dual",
+        facility_id="f1",
+    )
+    assert len(fake.indexed) == 1
+    _, _, body = fake.indexed[0]
+    assert body["resident_id"] == "r-dual"
+    assert body["resident_id_hash"] == hash_resident_id("r-dual")
+
+
+def test_search_similar_resolves_via_hash_cache_when_present(monkeypatch):
+    """캐시에 hash→rid 가 있으면 hit 의 hash 로부터 rid 를 복원한다 (e4 시나리오 미리보기)."""
+    rid = "r-hashed"
+    rid_hash = hash_resident_id(rid)
+    hits = [
+        {"_score": 0.95, "_source": {"resident_id_hash": rid_hash}},  # 평문 없음
+    ]
+    _install_client(monkeypatch, _FakeClient(ref_count=1, knn_hits=hits))
+    monkeypatch.setattr(OpenSearchService, "_hash_to_rid", {rid_hash: rid})
+
+    out = OpenSearchService.search_similar(
+        embedding=[0.1, 0.2], facility_id="fac-1", k=5, threshold=0.6
+    )
+    assert out == [(rid, 0.95)]
+
+
+def test_search_similar_falls_back_to_plain_when_hash_not_in_cache(monkeypatch):
+    """e2 기본 — 캐시 비어있어도 평문 resident_id fallback 으로 정상 동작."""
+    hits = [
+        {
+            "_score": 0.90,
+            "_source": {
+                "resident_id": "r-plain",
+                "resident_id_hash": hash_resident_id("r-plain"),
+            },
+        }
+    ]
+    _install_client(monkeypatch, _FakeClient(ref_count=1, knn_hits=hits))
+    monkeypatch.setattr(OpenSearchService, "_hash_to_rid", {})  # 캐시 비어있음
+
+    out = OpenSearchService.search_similar(
+        embedding=[0.1, 0.2], facility_id="fac-1", k=5, threshold=0.6
+    )
+    assert out == [("r-plain", 0.90)]
+
+
+def test_search_similar_skips_hit_with_no_resolvable_id(monkeypatch):
+    """resident_id 도 없고 resident_id_hash 가 캐시에 없는 hit 은 결과에서 제외."""
+    hits = [
+        {"_score": 0.95, "_source": {"resident_id_hash": "deadbeef-not-in-cache"}},
+        {"_score": 0.85, "_source": {"resident_id": "r-good"}},
+    ]
+    _install_client(monkeypatch, _FakeClient(ref_count=1, knn_hits=hits))
+    monkeypatch.setattr(OpenSearchService, "_hash_to_rid", {})
+
+    out = OpenSearchService.search_similar(
+        embedding=[0.1, 0.2], facility_id="fac-1", k=5, threshold=0.6
+    )
+    rids = [r for r, _ in out]
+    assert rids == ["r-good"]
+
+
+def test_reclassify_bulk_action_writes_both_fields(monkeypatch):
+    """T-004e2: reclassify_unmatched 의 bulk action 은 두 필드 다 set."""
+    pages = [[_hit("aligned", [1.0, 0.0])]]
+    _install_client(monkeypatch, _FakeClient(unmatched_pages=pages))
+
+    captured: list = []
+
+    def _fake_bulk(client, actions, raise_on_error=False):
+        actions_list = list(actions)
+        captured.append(actions_list)
+        return len(actions_list), []
+
+    monkeypatch.setattr(os_module, "bulk", _fake_bulk)
+
+    OpenSearchService.reclassify_unmatched(
+        facility_id="fac-1",
+        new_reference_embedding=[1.0, 0.0],
+        new_resident_id="r-new",
+        threshold=0.6,
+    )
+    assert len(captured) == 1 and len(captured[0]) == 1
+    doc = captured[0][0]["doc"]
+    assert doc["resident_id"] == "r-new"
+    assert doc["resident_id_hash"] == hash_resident_id("r-new")
+
+
+def test_ensure_index_includes_resident_id_hash_mapping(monkeypatch):
+    """T-004e2: 새 인덱스 mapping 에 resident_id_hash 가 keyword 로 등록돼야 함."""
+    fake = _install_client(monkeypatch, _FakeClient())
+    fake.indices.exists_map[FACE_INDEX] = False
+    monkeypatch.setattr(OpenSearchService, "_get_embedding_dim", classmethod(lambda cls: 256))
+
+    OpenSearchService.ensure_index()
+    assert len(fake.indices.created) == 1
+    _, body = fake.indices.created[0]
+    props = body["mappings"]["properties"]
+    assert props["resident_id_hash"] == {"type": "keyword"}
+
+
+# ---------------------------------------------------------------------------
+# T-004e3: migrate_resident_id_to_hash
+# ---------------------------------------------------------------------------
+
+
+class _MigrateFakeClient(_FakeClient):
+    """migrate_resident_id_to_hash 가 호출하는 search/bulk 만 고정값으로 응답."""
+
+    def __init__(self, pages: list[list[dict]]):
+        super().__init__()
+        self._pages = pages
+        self._page_calls = 0
+        self.search_bodies: list[dict] = []
+
+    def search(self, *, index: str, body: dict):  # type: ignore[override]
+        self.search_bodies.append(body)
+        idx = self._page_calls
+        self._page_calls += 1
+        page = self._pages[idx] if idx < len(self._pages) else []
+        return {"hits": {"hits": page}}
+
+
+def _migrate_hit(doc_id: str, resident_id: str) -> dict:
+    return {"_id": doc_id, "_source": {"resident_id": resident_id}}
+
+
+def test_migrate_resident_id_to_hash_backfills_missing_docs(monkeypatch):
+    """기존 docs (resident_id_hash 없음) 들이 모두 hash 로 backfill 되는지."""
+    pages = [
+        [_migrate_hit("d-1", "r-1"), _migrate_hit("d-2", "r-2")],
+    ]
+    _install_client(monkeypatch, _MigrateFakeClient(pages))
+
+    captured: list = []
+
+    def _fake_bulk(client, actions, raise_on_error=False):
+        actions_list = list(actions)
+        captured.append(actions_list)
+        return len(actions_list), []
+
+    monkeypatch.setattr(os_module, "bulk", _fake_bulk)
+
+    out = OpenSearchService.migrate_resident_id_to_hash()
+    assert out["scanned"] == 2
+    assert out["to_update"] == 2
+    assert out["updated"] == 2
+    assert out["errors"] == 0
+    assert out["capped"] is False
+
+    assert len(captured) == 1
+    actions = captured[0]
+    assert {a["_id"] for a in actions} == {"d-1", "d-2"}
+    by_id = {a["_id"]: a["doc"]["resident_id_hash"] for a in actions}
+    assert by_id["d-1"] == hash_resident_id("r-1")
+    assert by_id["d-2"] == hash_resident_id("r-2")
+
+
+def test_migrate_resident_id_to_hash_dry_run_skips_bulk(monkeypatch):
+    """dry_run=True 면 to_update 만 카운트하고 실제 bulk 는 호출 안함."""
+    pages = [[_migrate_hit("d-1", "r-1")]]
+    _install_client(monkeypatch, _MigrateFakeClient(pages))
+
+    bulk_called = {"count": 0}
+
+    def _fake_bulk(client, actions, raise_on_error=False):
+        bulk_called["count"] += 1
+        return 0, []
+
+    monkeypatch.setattr(os_module, "bulk", _fake_bulk)
+
+    out = OpenSearchService.migrate_resident_id_to_hash(dry_run=True)
+    assert out["to_update"] == 1
+    assert out["updated"] == 0
+    assert out["errors"] == 0
+    assert bulk_called["count"] == 0
+
+
+def test_migrate_resident_id_to_hash_filters_by_facility(monkeypatch):
+    """facility_id 인자가 query 의 must filter 에 포함돼야 함."""
+    pages = [[]]
+    fake = _install_client(monkeypatch, _MigrateFakeClient(pages))
+
+    OpenSearchService.migrate_resident_id_to_hash(facility_id="fac-only")
+    assert len(fake.search_bodies) == 1
+    must_clauses = fake.search_bodies[0]["query"]["bool"]["must"]
+    assert {"term": {"facility_id": "fac-only"}} in must_clauses
+    # 여전히 resident_id 존재 + hash 부재 조건 유지
+    assert {"exists": {"field": "resident_id"}} in must_clauses
+    must_not = fake.search_bodies[0]["query"]["bool"]["must_not"]
+    assert {"exists": {"field": "resident_id_hash"}} in must_not
+
+
+def test_migrate_resident_id_to_hash_returns_zero_when_nothing_to_backfill(monkeypatch):
+    """이미 마이그된 인덱스 — 조회 결과 0 → scanned/to_update 모두 0."""
+    _install_client(monkeypatch, _MigrateFakeClient([[]]))
+    monkeypatch.setattr(os_module, "bulk", lambda c, a, raise_on_error=False: (0, []))
+
+    out = OpenSearchService.migrate_resident_id_to_hash()
+    assert out == {
+        "scanned": 0,
+        "to_update": 0,
+        "updated": 0,
+        "errors": 0,
+        "capped": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 기존 partial auth 회귀 (재진입 막기 위해 마지막에 둠)
+# ---------------------------------------------------------------------------
 
 
 def test_get_client_partial_auth_ignored(monkeypatch):

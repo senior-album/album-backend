@@ -46,6 +46,7 @@ from app.core.database import get_db
 from app.core.security import require_operator
 from app.models.models import Facility, Guardian, Photo, PhotoProcessingJob, Resident, User
 from app.services.discord_notifier import send_ops_alert
+from app.services.opensearch_service import OpenSearchService
 
 logger = logging.getLogger(__name__)
 
@@ -950,3 +951,73 @@ async def post_ops_test_alert(
     await db.commit()
 
     return OpsTestAlertResponse(configured=configured, sent=sent)
+
+
+# ===========================================================================
+# T-004e3: OpenSearch resident_id → resident_id_hash 마이그레이션 트리거
+# ===========================================================================
+
+
+class MigrateResidentIdHashResponse(BaseModel):
+    """OpenSearchService.migrate_resident_id_to_hash 결과를 그대로 노출."""
+
+    scanned: int
+    to_update: int
+    updated: int
+    errors: int
+    capped: bool
+    dry_run: bool
+    facility_id: Optional[str] = None
+
+
+@router.post(
+    "/opensearch/migrate-resident-id-hash",
+    response_model=MigrateResidentIdHashResponse,
+)
+async def post_migrate_resident_id_hash(
+    facility_id: Optional[str] = Query(
+        None,
+        description="시설 ID 로 필터. 비어있으면 전체 인덱스 대상. 단계 배포 시 시설별 검증 권장.",
+    ),
+    dry_run: bool = Query(
+        False, description="True 면 update 없이 to_update 카운트만 반환."
+    ),
+    operator: dict = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> MigrateResidentIdHashResponse:
+    """T-004e3: face_embeddings 인덱스의 옛 docs 에 `resident_id_hash` backfill.
+
+    e2 머지 + 이미지 배포 (dual-write 활성화) 후 운영자가 1 회 호출. 배포 직후
+    추가되는 docs 는 dual-write 로 hash 가 즉시 채워지지만, e2 이전에 색인된
+    596 (예시) docs 는 hash 가 비어있다. 이 엔드포인트가 그것들을 backfill 한다.
+
+    호출 결과는 audit log 에 기록되어 reindex 이력 추적 가능.
+    """
+    result = OpenSearchService.migrate_resident_id_to_hash(
+        facility_id=facility_id, dry_run=dry_run
+    )
+
+    admin_audit(
+        db,
+        action="opensearch_migrate_resident_id_hash",
+        performed_by=operator.get("user_id"),
+        target_type="opensearch",
+        target_id="face_embeddings",
+        facility_id=facility_id,
+        detail=(
+            f"dry_run={dry_run} scanned={result['scanned']} "
+            f"to_update={result['to_update']} updated={result['updated']} "
+            f"errors={result['errors']} capped={result['capped']}"
+        ),
+    )
+    await db.commit()
+
+    return MigrateResidentIdHashResponse(
+        scanned=result["scanned"],
+        to_update=result["to_update"],
+        updated=result["updated"],
+        errors=result["errors"],
+        capped=result["capped"],
+        dry_run=dry_run,
+        facility_id=facility_id,
+    )
