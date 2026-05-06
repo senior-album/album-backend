@@ -328,6 +328,18 @@ async def verify_facility_access(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="해당 시설에 접근 권한이 없습니다.",
         )
+    # T-056: 시설장 승인 전 staff 차단. is_admin/is_operator 는 자동 통과 (시설장 본인이거나
+    # 운영자라 별도 승인 절차 불요). 가드 마지막에 둬서 시설 경계 검증을 먼저 수행.
+    if (
+        user.role == "staff"
+        and not user.is_staff_approved
+        and not user.is_admin
+        and not user.is_operator
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="승인 대기 중인 계정입니다. 시설 관리자에게 문의하세요.",
+        )
 
 
 async def verify_photo_access(
