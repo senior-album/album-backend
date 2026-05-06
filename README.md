@@ -45,8 +45,7 @@ src/backend/
 │       ├── notification_service.py # 알림 서비스
 │       └── biztalk_service.py      # 외부 연동 서비스
 ├── requirements.txt
-├── .env.example
-└── uploads/                        # MinIO 없을 때 로컬 저장소
+└── .env.example
 ```
 
 ## 설치 및 실행
