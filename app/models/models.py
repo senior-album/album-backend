@@ -554,3 +554,19 @@ class PhoneClaimReport(Base):
     status = Column(String(20), nullable=False, default="pending", index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PasswordResetToken(Base):
+    """
+    T-306: 비밀번호 재설정 토큰. 토큰 자체가 아닌 sha256 해시만 저장 (DB 유출
+    시 재사용 차단). 30분 TTL + 1회용 (used_at IS NOT NULL 이면 사용 완료).
+    """
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True)  # sha256 hex
+    channel = Column(String(10), nullable=False)  # email | sms
+    expires_at = Column(DateTime, nullable=False, index=True)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
