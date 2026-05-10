@@ -528,6 +528,12 @@ class Event(Base):
     end_at = Column(DateTime, nullable=True)
     all_day = Column(Boolean, default=True, nullable=False)
 
+    # T-243-4: 생신 이벤트의 D-7 알림이 발송된 시각. NULL = 미발송. cron 이
+    # 매일 활성 입소자의 올해 생신 event 를 idempotent 생성하기 때문에, 알림
+    # 발송 여부는 event 존재만으론 판단할 수 없어 별도 컬럼이 필요. 다른
+    # 이벤트 타입 (outing/other) 에는 항상 NULL.
+    birthday_notified_at = Column(DateTime, nullable=True)
+
     created_by = Column(String(36), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
