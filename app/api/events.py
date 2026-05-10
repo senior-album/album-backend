@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -38,6 +38,20 @@ router = APIRouter(tags=["events"])
 # ---------------------------------------------------------------------------
 # 헬퍼
 # ---------------------------------------------------------------------------
+
+def _to_naive_utc(dt: datetime | None) -> datetime | None:
+    """tz-aware datetime 을 UTC naive 로 정규화.
+
+    Why: Event.start_at/end_at 컬럼이 `DateTime` (naive) 인데 프론트는
+    `toISOString()` 으로 `...Z` (tz-aware UTC) 를 보낸다. asyncpg 는 tz-aware
+    datetime 을 `timestamp without time zone` 컬럼 비교 파라미터에 바인드하면
+    DataError 를 던지므로 (T-303), 라우트 진입 직후 tzinfo 를 벗긴다. 프로젝트
+    컨벤션은 naive UTC (모델 디폴트가 `datetime.utcnow()`) 라 의미 손실 없음.
+    """
+    if dt is None or dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
 
 async def _load_event(db: AsyncSession, event_id: str) -> Event:
     stmt = select(Event).filter(Event.id == event_id)
@@ -155,6 +169,8 @@ async def list_facility_events(
     `from`/`to` 는 양쪽 inclusive (start_at 기준). 가디언은 자기 입소자 이벤트
     + 시설 전체 행사만 응답에 포함된다.
     """
+    from_ = _to_naive_utc(from_)
+    to = _to_naive_utc(to)
     if from_ and to and from_ > to:
         raise HTTPException(status_code=400, detail="from 이 to 보다 클 수 없습니다.")
 
@@ -215,7 +231,10 @@ async def create_facility_event(
     """이벤트 생성 — 직원만. resident_id 가 들어오면 시설 일치 검증."""
     await _verify_event_write(current_user, facility_id, db)
 
-    if payload.end_at is not None and payload.end_at < payload.start_at:
+    start_at = _to_naive_utc(payload.start_at)
+    end_at = _to_naive_utc(payload.end_at)
+
+    if end_at is not None and end_at < start_at:
         raise HTTPException(status_code=400, detail="end_at 이 start_at 보다 빠를 수 없습니다.")
 
     if payload.resident_id is not None:
@@ -228,8 +247,8 @@ async def create_facility_event(
         type=payload.type,
         title=payload.title,
         description=payload.description,
-        start_at=payload.start_at,
-        end_at=payload.end_at,
+        start_at=start_at,
+        end_at=end_at,
         all_day=payload.all_day,
         created_by=current_user["user_id"],
     )
@@ -263,6 +282,13 @@ async def update_event(
     await _verify_event_write(current_user, event.facility_id, db)
 
     update_fields = payload.model_dump(exclude_unset=True)
+
+    # tz-aware datetime → naive UTC 정규화 (T-303). 컬럼이 naive 라 raw bind 시
+    # asyncpg DataError.
+    if "start_at" in update_fields:
+        update_fields["start_at"] = _to_naive_utc(update_fields["start_at"])
+    if "end_at" in update_fields:
+        update_fields["end_at"] = _to_naive_utc(update_fields["end_at"])
 
     # resident_id 시설 일치 검증 — 명시적으로 들어왔을 때만.
     if "resident_id" in update_fields and update_fields["resident_id"] is not None:

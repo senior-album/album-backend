@@ -353,6 +353,46 @@ async def test_list_filters_by_period_and_type(integration_client, integration_d
 
 
 @pytest.mark.asyncio
+async def test_list_and_create_accept_tz_aware_iso(integration_client, integration_db):
+    """T-303: 프론트가 `toISOString()` 으로 보내는 `...Z` (tz-aware UTC) 도 받아야
+    한다. 컬럼이 naive 라 라우트에서 정규화하지 않으면 asyncpg DataError 로 500.
+    """
+    from datetime import timezone
+
+    _SL, session = integration_db
+    fac = await _seed_facility(session, code="FAC-TZ")
+    staff = await _seed_user(session, email="stz@x.io", role="staff", facility_id=fac.id)
+
+    # create — body 에 tz-aware ISO (Z)
+    resp = await integration_client.post(
+        f"/facilities/{fac.id}/events",
+        json=_payload(
+            type="outing",
+            title="UTC 야유회",
+            start_at=datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc),
+            end_at=datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+            all_day=False,
+        ),
+        cookies=_auth_cookies(staff),
+    )
+    assert resp.status_code == 201, resp.text
+
+    # list — query 에 tz-aware ISO (Z)
+    resp2 = await integration_client.get(
+        f"/facilities/{fac.id}/events",
+        params={
+            "from": datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc).isoformat(),
+            "to": datetime(2026, 5, 31, 23, 59, tzinfo=timezone.utc).isoformat(),
+        },
+        cookies=_auth_cookies(staff),
+    )
+    assert resp2.status_code == 200, resp2.text
+    body = resp2.json()
+    assert len(body) == 1
+    assert body[0]["title"] == "UTC 야유회"
+
+
+@pytest.mark.asyncio
 async def test_guardian_list_scoped_to_own_resident_plus_facility_wide(
     integration_client, integration_db
 ):
