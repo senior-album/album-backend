@@ -40,6 +40,7 @@ pre-commit install
 | `TUNNEL_TOKEN` | Cloudflare Zero Trust → Networks → Tunnels | 동일 | `cloudflared-secret`(prod only) |
 | `COOLSMS_API_KEY` | coolsms.co.kr → 대시보드 → API keys | 동일 | `.env`(dev), `backend-secret`(prod) — SMS_PROVIDER=coolsms 일 때만 |
 | `COOLSMS_API_SECRET` | 위와 동일 | 동일 | 동일 |
+| `BREVO_API_KEY` | app.brevo.com → SMTP & API → API Keys | 동일 | `.env`(dev), `backend-secret`(prod) — EMAIL_PROVIDER=brevo 일 때만. DNS 셋업은 `docs/EMAIL_DNS.md` 참조 |
 
 ### 저장 위치 요약
 
