@@ -131,26 +131,19 @@ class NotificationService:
         subject: str,
         body: str,
     ) -> bool:
-        """
-        이메일 알림 전송 (스텁)
+        """T-305: 이메일 발송. EMAIL_PROVIDER=log (기본) 시 로그만, brevo 시 실제 발송.
 
-        Args:
-            email: 수신자 이메일
-            subject: 메일 제목
-            body: 메일 본문
-
-        Returns:
-            성공 여부
+        body 는 plain text 또는 HTML 모두 허용. HTML 태그가 포함되면 그대로
+        htmlContent 로 전달, 없으면 textContent 로 전달.
         """
         try:
-            logger.info(f"Sending email to {email}: {subject}")
+            from app.services.email import get_email_provider
 
-            # SMTP 또는 이메일 서비스 API 호출 (구현 필요)
-            # 예시: smtp.send_email(email, subject, body)
-
-            logger.info(f"Email sent to {email}")
+            is_html = "<" in body and ">" in body
+            html = body if is_html else f"<pre>{body}</pre>"
+            text = None if is_html else body
+            await get_email_provider().send(to=email, subject=subject, html=html, text=text)
             return True
-
         except Exception as e:
             logger.error(f"Email notification failed: {e}")
             return False

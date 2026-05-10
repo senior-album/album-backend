@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     KAKAO_REDIRECT_URI: str = "http://localhost:5173/auth/kakao/callback"
     KAKAO_SCOPES: str = "openid"  # 비즈앱 전환 후: "openid,profile_nickname,account_email,phone_number"
 
+    # T-305: 이메일 프로바이더 (log | brevo). brevo 시 BREVO_* 필수.
+    EMAIL_PROVIDER: str = "log"
+    BREVO_API_KEY: str = ""
+    BREVO_FROM_EMAIL: str = ""  # 발송 주소 — 도메인은 docs/EMAIL_DNS.md 셋업 후 사용
+    BREVO_FROM_NAME: str = ""  # 발송자 표시명 (빈 값이면 "Senior Album" 디폴트)
+
     # 프론트엔드 / 외부 URL
     FRONTEND_URL: str = "http://localhost:5173"
     API_BASE_URL: str = "http://localhost:8000"
