@@ -65,11 +65,24 @@ jobs:
           path: deploy
 
       - name: Update image tag
+        # T-308: backend deployment + 모든 cron 매니페스트의 image SHA 일괄 갱신.
+        # 과거에는 backend.yaml 만 갱신해서 cronjob 매니페스트가 오랫동안
+        # stale SHA 로 prod 에 떠있었고, 결과적으로 T-243-4 backfill 코드가
+        # cron 컨테이너에 반영되지 않아 캘린더 표시 누락 사고 발생.
         run: |
           cd deploy
           SHORT_SHA=${GITHUB_SHA::7}
-          sed -i "s|image: ghcr.io/senior-album/album-backend:.*|image: ghcr.io/senior-album/album-backend:${SHORT_SHA}|" k8s/backend.yaml
+          # k8s/ 안에서 album-backend 이미지를 참조하는 모든 매니페스트 일괄
+          # 갱신. 새 cron 추가 시에도 추가 작업 없이 자동 sync.
+          FILES=$(grep -rl "image: ghcr.io/senior-album/album-backend:" k8s/ || true)
+          if [ -z "$FILES" ]; then
+            echo "No album-backend image references found in k8s/"
+            exit 0
+          fi
+          echo "Updating image to ${SHORT_SHA} in:"
+          echo "$FILES"
+          echo "$FILES" | xargs sed -i "s|image: ghcr.io/senior-album/album-backend:.*|image: ghcr.io/senior-album/album-backend:${SHORT_SHA}|"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add k8s/backend.yaml
+          git add k8s/
           git diff --cached --quiet && echo "No changes" || (git commit -m "chore: update backend image to ${SHORT_SHA}" && git push)
