@@ -269,6 +269,97 @@ async def test_invitation_create_sms_email_returns_manual_share(integration_clie
 
 
 @pytest.mark.asyncio
+async def test_invitation_create_sms_coolsms_auto_send(integration_client, integration_db, monkeypatch):
+    """T-307: SMS_PROVIDER=coolsms 셋업 시 invitation 흐름이 자동 발송 (delivery_status=sent)."""
+    from app.api import invitations as invitations_module
+    from app.core import config as cfg
+    from app.services.sms import SmsProvider
+
+    sent_calls: list[tuple[str, str]] = []
+
+    class _StubProvider(SmsProvider):
+        async def send(self, phone: str, message: str) -> None:
+            sent_calls.append((phone, message))
+
+    cfg.get_settings.cache_clear()
+    monkeypatch.setenv("SMS_PROVIDER", "coolsms")
+    monkeypatch.setattr(invitations_module, "get_sms_provider", lambda: _StubProvider())
+
+    try:
+        _SL, session = integration_db
+        fac = await _seed_facility(session, code="FAC-T307A", name="자동발송요양원")
+        staff = await _seed_user(session, email="staff-t307a@x.io", role="staff", facility_id=fac.id)
+        res = await _seed_resident(session, facility_id=fac.id, name="박할머니")
+
+        resp = await integration_client.post(
+            "/invitations",
+            json={
+                "resident_id": res.id,
+                "invite_type": "sms",
+                "phone": "01099998888",
+                "relationship_type": "딸",
+            },
+            cookies=_auth_cookies(staff),
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["delivery_status"] == "sent"
+        assert body["invite_url"] is not None
+
+        # CoolSMS stub 가 정확히 한 번 호출 + 메시지에 시설명 / 입소자명 / URL 포함
+        assert len(sent_calls) == 1
+        phone_arg, msg_arg = sent_calls[0]
+        assert phone_arg == "01099998888"
+        assert "자동발송요양원" in msg_arg
+        assert "박할머니" in msg_arg
+        assert body["invite_url"] in msg_arg
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_invitation_create_sms_coolsms_failure_falls_back(
+    integration_client, integration_db, monkeypatch
+):
+    """T-307: CoolSMS 발송 실패 시 manual_share fallback — 가짜 발송 200 회귀 방지."""
+    from app.api import invitations as invitations_module
+    from app.core import config as cfg
+    from app.services.sms import SmsProvider
+
+    class _FailingProvider(SmsProvider):
+        async def send(self, phone: str, message: str) -> None:
+            raise RuntimeError("CoolSMS down (simulated)")
+
+    cfg.get_settings.cache_clear()
+    monkeypatch.setenv("SMS_PROVIDER", "coolsms")
+    monkeypatch.setattr(invitations_module, "get_sms_provider", lambda: _FailingProvider())
+
+    try:
+        _SL, session = integration_db
+        fac = await _seed_facility(session, code="FAC-T307B")
+        staff = await _seed_user(session, email="staff-t307b@x.io", role="staff", facility_id=fac.id)
+        res = await _seed_resident(session, facility_id=fac.id)
+
+        resp = await integration_client.post(
+            "/invitations",
+            json={
+                "resident_id": res.id,
+                "invite_type": "sms",
+                "phone": "01077776666",
+                "relationship_type": "아들",
+            },
+            cookies=_auth_cookies(staff),
+        )
+        # 200 + manual_share — 프런트가 deeplink UI 로 fallback
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["delivery_status"] == "manual_share"
+        assert body["invite_url"] is not None
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_invitation_create_inapp_happy_path(integration_client, integration_db):
     """가입 회원 초대 → Invitation + Notification + AdminAuditLog(channel=in_app)."""
     _SL, session = integration_db

@@ -21,6 +21,7 @@ from app.core.security import get_current_user, get_current_guardian, get_curren
 from app.models.models import Invitation, Guardian, Resident, User, Facility, Notification
 from app.schemas.schemas import InvitationCreate, InvitationResponse
 from app.services.poster import build_invitation_poster_pdf
+from app.services.sms import get_sms_provider
 
 logger = logging.getLogger(__name__)
 
@@ -167,13 +168,27 @@ async def create_invitation(
     )
     await db.commit()
 
-    # T-304: 알림톡 대행사 (T-061) 미연동 + SMTP 미연동 상태라 sms / email 채널은
-    # 백엔드에서 실제 발송하지 않는다. invite_url 을 응답에 실어 보내 직원이 본인
-    # SMS / 이메일 / 메신저 앱으로 수동 공유하도록 한다 — 가짜 발송 후 200 OK 로
-    # "보냈습니다" 알림하던 이전 동작은 사용자에게 거짓말을 했음 (T-303/T-304 발견).
+    # T-304: invite_url 을 응답에 실어 보내 직원이 본인 SMS / 이메일 / 메신저로
+    # 수동 공유 (manual_share). T-307: SMS 채널 + phone + CoolSMS 셋업 시 자동
+    # 발송 시도, 실패하면 manual_share fallback. 이메일 자동 발송은 T-305 (Brevo)
+    # 머지 후 별도로 추가될 예정.
     settings = get_settings()
     invite_url = f"{settings.FRONTEND_URL.rstrip('/')}/invitations/{invitation.id}"
     delivery_status = "in_app" if invite_type == "in_app" else "manual_share"
+
+    if invite_type == "sms" and req.phone and settings.SMS_PROVIDER == "coolsms":
+        facility_name = facility.name if facility else "시설"
+        sms_message = (
+            f"[Senior Album] {facility_name}에서 {resident.name}님 보호자로 "
+            f"초대하셨습니다. 가입: {invite_url}"
+        )
+        try:
+            await get_sms_provider().send(req.phone, sms_message)
+            delivery_status = "sent"
+        except Exception as e:
+            # 실패 시 manual_share fallback — 직원이 본인 폰의 SMS 앱으로 공유.
+            # 응답 200 + manual_share 라 프런트는 deeplink UI 를 그대로 노출.
+            logger.warning(f"[invitation:sms] CoolSMS send failed, fallback to manual_share: {e}")
 
     return InvitationResponse(
         id=invitation.id,

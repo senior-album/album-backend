@@ -40,7 +40,6 @@ pre-commit install
 | `TUNNEL_TOKEN` | Cloudflare Zero Trust → Networks → Tunnels | 동일 | `cloudflared-secret`(prod only) |
 | `COOLSMS_API_KEY` | coolsms.co.kr → 대시보드 → API keys | 동일 | `.env`(dev), `backend-secret`(prod) — SMS_PROVIDER=coolsms 일 때만 |
 | `COOLSMS_API_SECRET` | 위와 동일 | 동일 | 동일 |
-| `BIZZTALK_SENDER_KEY` | Kakao 비즈채널 신청 후 발급 | 동일 | 동일 |
 
 ### 저장 위치 요약
 
