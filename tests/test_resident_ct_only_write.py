@@ -166,3 +166,90 @@ async def test_get_residents_orders_by_decrypted_name(integration_client, integr
     names = [r["name"] for r in list_resp.json()]
     assert names == sorted(names)  # decrypt 후 정렬됐는지
     assert names == ["가방", "나비", "다람쥐"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_val", ["", "   ", "\t"])
+async def test_post_resident_empty_birth_date_stores_null(
+    integration_client, integration_db, empty_val
+):
+    """T-310: POST 시 birth_date 가 빈 문자열/공백이면 ct 컬럼은 NULL.
+
+    이전엔 ``is not None`` 가드만 있어서 ``encrypt_field("", dek)`` 가 실행되고
+    nonce 12 + tag 16 + 0 byte plaintext = 28 byte ciphertext 가 row 에 박혀서
+    cron decrypt 단계에서 ``Invalid isoformat string: ''`` 가 발생했다.
+    """
+    SessionLocal, session = integration_db
+    fac = await _seed_facility(session)
+    staff = await _seed_staff(session, fac.id)
+
+    resp = await integration_client.post(
+        "/residents",
+        json={
+            "facility_id": fac.id,
+            "name": "홍길동",
+            "birth_date": empty_val,
+            "medical_notes": empty_val,
+        },
+        cookies=_auth_cookies(staff),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["birth_date"] is None
+    assert body["medical_notes"] is None
+
+    async with SessionLocal() as s:
+        row = (await s.execute(select(Resident).filter(Resident.id == body["id"]))).scalar_one()
+        # name 은 정상 값이라 ct 채워짐
+        assert row.name_ct is not None
+        # 빈 문자열은 normalize 로 None → ct 자체가 NULL
+        assert row.birth_date_ct is None
+        assert row.medical_notes_ct is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank_name", ["", "   ", "\t"])
+async def test_post_resident_blank_name_rejected(
+    integration_client, integration_db, blank_name
+):
+    """T-310: name 이 빈 문자열/공백이면 422 — 빈 평문이 encrypt 되는 사고 차단."""
+    SessionLocal, session = integration_db
+    fac = await _seed_facility(session)
+    staff = await _seed_staff(session, fac.id)
+
+    resp = await integration_client.post(
+        "/residents",
+        json={"facility_id": fac.id, "name": blank_name},
+        cookies=_auth_cookies(staff),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_put_resident_empty_birth_date_clears_ct(integration_client, integration_db):
+    """T-310: PUT 으로 birth_date='' 보내면 기존 ct 가 NULL 로 클리어된다."""
+    SessionLocal, session = integration_db
+    fac = await _seed_facility(session)
+    staff = await _seed_staff(session, fac.id)
+
+    create_resp = await integration_client.post(
+        "/residents",
+        json={"facility_id": fac.id, "name": "초기", "birth_date": "1945-05-05"},
+        cookies=_auth_cookies(staff),
+    )
+    rid = create_resp.json()["id"]
+
+    async with SessionLocal() as s:
+        before = (await s.execute(select(Resident).filter(Resident.id == rid))).scalar_one()
+        assert before.birth_date_ct is not None  # 정상 ct
+
+    put_resp = await integration_client.put(
+        f"/residents/{rid}", json={"birth_date": ""}, cookies=_auth_cookies(staff)
+    )
+    assert put_resp.status_code == 200, put_resp.text
+
+    async with SessionLocal() as s:
+        after = (await s.execute(select(Resident).filter(Resident.id == rid))).scalar_one()
+        # 빈 문자열은 None 으로 normalize 됨 → 기존 ct 보존 (변경 안 함)
+        # 즉 PATCH 의미 — None 이 들어오는 것과 동일.
+        assert after.birth_date_ct == before.birth_date_ct

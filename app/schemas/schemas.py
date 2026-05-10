@@ -5,7 +5,7 @@ Pydantic 스키마 정의
 
 from datetime import date, datetime
 from typing import Literal, Optional, List
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 # ==================== 인증 관련 스키마 ====================
@@ -162,6 +162,17 @@ class FacilityUpdate(BaseModel):
 
 # ==================== 입소자 관련 스키마 ====================
 
+def _empty_str_to_none(v):
+    # T-310: 입력 단에서 '' 또는 whitespace-only → None 정규화. PII (name·
+    # birth_date·medical_notes) 가 빈 문자열로 들어오면 _apply_pii_encryption 의
+    # `is not None` 가드를 통과해 빈 평문이 AES-GCM 으로 암호화돼 row 에 박히고,
+    # cron 의 birth_date decrypt 단계에서 `Invalid isoformat string: ''` 가
+    # 매일 발생 (T-309 검증 중 발견, prod 3건 영향).
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
 class ResidentBase(BaseModel):
     """입소자 기본 정보"""
     name: str
@@ -169,6 +180,19 @@ class ResidentBase(BaseModel):
     gender: Optional[str] = None
     room_number: Optional[str] = None
     medical_notes: Optional[str] = None
+
+    _normalize_optional_pii = field_validator(
+        "birth_date", "medical_notes", mode="before"
+    )(_empty_str_to_none)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _name_must_not_be_blank(cls, v):
+        # T-310: name 은 required 라 빈 문자열도 같은 사고 (encrypt_field("", dek)
+        # → name_ct 28 byte + blind_index("") 의미없는 hash) 위험. 422 로 거부.
+        if isinstance(v, str) and not v.strip():
+            raise ValueError("name must not be empty or whitespace")
+        return v
 
 
 class ResidentCreate(ResidentBase):
@@ -183,6 +207,12 @@ class ResidentUpdate(BaseModel):
     gender: Optional[str] = None
     room_number: Optional[str] = None
     medical_notes: Optional[str] = None
+
+    # Update 는 부분 갱신 — name 도 Optional 이라 빈 문자열 들어오면 "변경 안 함"
+    # 으로 normalize (= None). Base 와 달리 name 도 normalize 대상에 포함.
+    _normalize_optional_pii = field_validator(
+        "name", "birth_date", "medical_notes", mode="before"
+    )(_empty_str_to_none)
 
 
 class ResidentResponse(ResidentBase):
