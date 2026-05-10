@@ -218,12 +218,54 @@ async def test_invitation_create_sms_regression(integration_client, integration_
     assert body["invite_type"] == "sms"
     assert body["phone"] == "01011112222"
     assert body["invitee_user_id"] is None
+    # T-304: sms 는 manual_share — 백엔드 발송 안 하고 invite_url 을 직원에게
+    # 노출해 본인 SMS / 메신저로 수동 공유.
+    assert body["delivery_status"] == "manual_share"
+    assert body["invite_url"] is not None
+    assert body["invite_url"].endswith(f"/invitations/{body['id']}")
 
     # 감사 로그 channel='phone'
     log_q = await session.execute(select(AdminAuditLog).filter(AdminAuditLog.action == "invitation_create"))
     logs = log_q.scalars().all()
     assert len(logs) == 1
     assert "channel=phone" in (logs[0].detail or "")
+
+
+@pytest.mark.asyncio
+async def test_invitation_create_sms_email_returns_manual_share(integration_client, integration_db):
+    """T-304: sms 채널 + email 입력도 manual_share 로 invite_url 노출.
+
+    SMTP 미연동 상태에서 백엔드는 자동 발송을 시도하지 않고, 직원이 본인
+    이메일 클라이언트로 수동 공유한다 (가짜 발송 200 OK 회귀 방지).
+    """
+    _SL, session = integration_db
+    fac = await _seed_facility(session)
+    staff = await _seed_user(session, email="staff-eml@x.io", role="staff", facility_id=fac.id)
+    res = await _seed_resident(session, facility_id=fac.id)
+
+    resp = await integration_client.post(
+        "/invitations",
+        json={
+            "resident_id": res.id,
+            "invite_type": "sms",
+            "email": "guardian@example.com",
+            "relationship_type": "아들",
+        },
+        cookies=_auth_cookies(staff),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["invite_type"] == "sms"
+    assert body["email"] == "guardian@example.com"
+    assert body["phone"] is None
+    assert body["delivery_status"] == "manual_share"
+    assert body["invite_url"] is not None
+    assert body["invite_url"].endswith(f"/invitations/{body['id']}")
+
+    log_q = await session.execute(select(AdminAuditLog).filter(AdminAuditLog.action == "invitation_create"))
+    logs = log_q.scalars().all()
+    assert len(logs) == 1
+    assert "channel=email" in (logs[0].detail or "")
 
 
 @pytest.mark.asyncio
@@ -252,6 +294,11 @@ async def test_invitation_create_inapp_happy_path(integration_client, integratio
     assert body["invitee_user_id"] == invitee.id
     assert body["invitee_name"] == "이보호자"
     assert body["phone"] is None and body["email"] is None
+    # T-304: in_app 은 인앱 알림 레코드 생성 = 실제 "발송" 도달.
+    assert body["delivery_status"] == "in_app"
+    # invite_url 은 모든 채널에 노출 (in_app 도 직원이 별도로 링크 안내해야 할 수 있음).
+    assert body["invite_url"] is not None
+    assert body["invite_url"].endswith(f"/invitations/{body['id']}")
 
     # Notification 레코드 1개 생성 + 받는 사람 = invitee
     notif_q = await session.execute(select(Notification).filter(Notification.user_id == invitee.id))
