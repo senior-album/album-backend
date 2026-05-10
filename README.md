@@ -43,7 +43,8 @@ src/backend/
 │       ├── photo_service.py        # 사진 처리 로직
 │       ├── photo_worker.py         # 백그라운드 사진 처리 워커
 │       ├── notification_service.py # 알림 서비스
-│       └── biztalk_service.py      # 외부 연동 서비스
+│       ├── sms.py                  # SMS 발송 (CoolSMS)
+│       └── phone_otp.py            # 전화번호 OTP
 ├── requirements.txt
 └── .env.example
 ```

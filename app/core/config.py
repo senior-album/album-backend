@@ -126,11 +126,6 @@ class Settings(BaseSettings):
     KAKAO_REDIRECT_URI: str = "http://localhost:5173/auth/kakao/callback"
     KAKAO_SCOPES: str = "openid"  # 비즈앱 전환 후: "openid,profile_nickname,account_email,phone_number"
 
-    # 카카오 비즈톡 (알림톡)
-    BIZZTALK_SENDER_KEY: str = ""
-    BIZZTALK_TEMPLATE_CODE_INVITE: str = ""
-    BIZZTALK_TEMPLATE_CODE_PHOTO: str = ""
-
     # 프론트엔드 / 외부 URL
     FRONTEND_URL: str = "http://localhost:5173"
     API_BASE_URL: str = "http://localhost:8000"
