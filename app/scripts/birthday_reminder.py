@@ -1,13 +1,17 @@
-"""T-243-3 — 생신 자동 발급 + D-7 인앱 알림 cron 작업.
+"""T-243-3/4 — 생신 자동 발급 + D-7 인앱 알림 cron 작업.
 
-매일 1회 k8s CronJob 으로 실행 (album-deploy 별도 매니페스트). 오늘 + 7일
-후가 생일인 활성 입소자를 추출해:
+매일 1회 k8s CronJob 으로 실행 (album-deploy 별도 매니페스트). 두 가지 일을
+독립적으로 처리한다:
 
-  1) `Event(type='birthday')` 를 올해 날짜로 멱등 생성.
-     dedup 키: `(resident_id, type='birthday', year(start_at) = target_year)`.
-  2) 승인된 보호자 + 시설 활성 staff 에게 `Notification` 발송.
-     `notification_type='event_birthday_reminder'`. 멱등성은 1) 의 신규 event
-     생성이 일어났을 때만 보내는 흐름으로 자연 보장.
+  1) **캘린더용 event 생성 (T-243-4)** — 활성 입소자의 **올해 birthday event** 를
+     idempotent 생성. D-7 여부와 무관하게 항상 보장 — 그래야 캘린더 그리드에
+     모든 어르신 생신이 미리 표시된다.
+     dedup 키: `(resident_id, type='birthday', year(start_at) = today.year)`.
+  2) **D-7 알림 (T-243-3)** — `today + 7 == 생일` 매칭일 때만 승인된 보호자 +
+     시설 활성 staff 에게 `Notification(type='event_birthday_reminder')` 발송.
+     같은 (resident, year) 에 대해 1회만 보내야 하므로 발송 후 event 의
+     `birthday_notified_at` 을 채워 dedup. 같은 날 cron 이 두 번 돌거나 (수동
+     replay) 의도치 않게 다시 호출되면 두 번째는 skip.
 
 CronJob 컨테이너는 `RESIDENT_PII_KEK` env 가 마운트돼 있어야 한다 — 입소자
 이름 + 생년월일은 envelope encryption 컬럼이라 복호화 필요. 누락 시 첫
@@ -16,7 +20,7 @@ CronJob 컨테이너는 `RESIDENT_PII_KEK` env 가 마운트돼 있어야 한다
 `created_by` 는 시스템 자동 생성용 첫 시설장 (`is_admin=True`) → 운영자 →
 없으면 그 시설은 skip + warning.
 
-윤일 (2/29) 출생자: D-7 매칭이 깨지므로 1차 비대상. 후속 정책 (issue#203).
+윤일 (2/29) 출생자: 1차 비대상 (event 도, 알림도 안 만듦). 후속 정책 (issue#203).
 """
 
 from __future__ import annotations
@@ -136,6 +140,7 @@ async def _scan_and_emit(
         "skipped_existing": 0,
         "skipped_leap_day": 0,
         "skipped_no_creator": 0,
+        "notifications_skipped_existing": 0,
         "decrypt_errors": 0,
         "scanned_residents": 0,
     }
@@ -159,32 +164,9 @@ async def _scan_and_emit(
             summary["decrypt_errors"] += 1
             continue
 
-        # 윤일 출생자: D-7 매칭이 깨지므로 1차 비대상.
+        # 윤일 출생자: 1차 비대상 (event/알림 둘 다 안 만듦).
         if bd.month == 2 and bd.day == 29:
             summary["skipped_leap_day"] += 1
-            continue
-
-        if (bd.month, bd.day) != (target.month, target.day):
-            continue
-
-        this_year_bday = datetime(target.year, bd.month, bd.day)
-
-        # 멱등성 — 같은 해 이미 birthday event 있으면 skip.
-        if (
-            await _existing_birthday_event(session, r.id, this_year_bday.year)
-            is not None
-        ):
-            summary["skipped_existing"] += 1
-            continue
-
-        creator_id = await _resolve_creator_id(session, r.facility_id)
-        if creator_id is None:
-            logger.warning(
-                "facility=%s 시설장/운영자 없음 — resident=%s 생신 이벤트 skip",
-                r.facility_id,
-                r.id,
-            )
-            summary["skipped_no_creator"] += 1
             continue
 
         try:
@@ -194,20 +176,47 @@ async def _scan_and_emit(
         except Exception:
             name = "어르신"
 
-        ev = Event(
-            id=str(uuid.uuid4()),
-            facility_id=r.facility_id,
-            resident_id=r.id,
-            type="birthday",
-            title=f"{name} 어르신 생신",
-            description=None,
-            start_at=this_year_bday,
-            end_at=None,
-            all_day=True,
-            created_by=creator_id,
-        )
-        session.add(ev)
-        summary["events_created"] += 1
+        # ── Step 1: 올해 birthday event 가 없으면 생성 (캘린더용, D-7 무관).
+        this_year_bday = datetime(today.year, bd.month, bd.day)
+        event = await _existing_birthday_event(session, r.id, today.year)
+
+        if event is None:
+            creator_id = await _resolve_creator_id(session, r.facility_id)
+            if creator_id is None:
+                logger.warning(
+                    "facility=%s 시설장/운영자 없음 — resident=%s 생신 이벤트 skip",
+                    r.facility_id,
+                    r.id,
+                )
+                summary["skipped_no_creator"] += 1
+                continue
+
+            event = Event(
+                id=str(uuid.uuid4()),
+                facility_id=r.facility_id,
+                resident_id=r.id,
+                type="birthday",
+                title=f"{name} 어르신 생신",
+                description=None,
+                start_at=this_year_bday,
+                end_at=None,
+                all_day=True,
+                created_by=creator_id,
+            )
+            session.add(event)
+            # 같은 run 안에서 birthday_notified_at 을 갱신할 수 있도록 PK 확정.
+            await session.flush()
+            summary["events_created"] += 1
+        else:
+            summary["skipped_existing"] += 1
+
+        # ── Step 2: D-7 매칭 시 알림 발송 (event 단위 idempotent).
+        if (bd.month, bd.day) != (target.month, target.day):
+            continue
+
+        if event.birthday_notified_at is not None:
+            summary["notifications_skipped_existing"] += 1
+            continue
 
         recipients = await _recipient_user_ids(session, r.id, r.facility_id)
         notif_msg = f"{this_year_bday.strftime('%Y년 %m월 %d일')} 생신입니다."
@@ -222,6 +231,7 @@ async def _scan_and_emit(
                 )
             )
             summary["notifications_created"] += 1
+        event.birthday_notified_at = datetime.utcnow()
 
     return summary
 
