@@ -3,6 +3,8 @@
 이메일/비밀번호 로그인, 3가지 역할 회원가입, refresh 토큰 rotation (T-009)
 """
 
+import hashlib
+import secrets
 import uuid
 import logging
 from datetime import datetime, timedelta
@@ -30,14 +32,18 @@ from app.core.security import (
 from app.core.redis import check_rate_limit, clear_rate_limit
 from app.models.models import (
     User, Facility, Resident, Guardian, RefreshToken,
-    ConsentDocument, UserConsent,
+    ConsentDocument, UserConsent, PasswordResetToken,
 )
 from app.schemas.schemas import (
     LoginRequest,
     RegisterAdminRequest,
     RegisterStaffRequest,
     RegisterGuardianRequest,
+    PasswordResetRequest,
+    PasswordResetConfirm,
 )
+from app.services.email import get_email_provider
+from app.services.sms import get_sms_provider
 
 logger = logging.getLogger(__name__)
 
@@ -697,3 +703,154 @@ async def get_me(
         },
         "facility": facility_data,
     }
+
+
+# ==================== T-306: 비밀번호 재설정 ====================
+
+PASSWORD_RESET_TTL_MINUTES = 30
+# 응답이 사용자 존재 여부를 노출하지 않도록 항상 동일 본문. 메시지를 통일하면
+# 공격자가 enumerate 못 함.
+_PASSWORD_RESET_GENERIC_RESPONSE = {
+    "message": "요청이 접수되었습니다. 가입된 계정이면 메시지를 받게 됩니다.",
+}
+
+
+def _hash_token(token: str) -> str:
+    """sha256 hex — DB 에 토큰 자체 대신 저장."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _build_reset_url(settings, token: str) -> str:
+    return f"{settings.FRONTEND_URL.rstrip('/')}/reset-password/{token}"
+
+
+@router.post("/password/reset/request")
+async def password_reset_request(
+    payload: PasswordResetRequest,
+    req: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """T-306: 비밀번호 재설정 요청. channel=email|sms. 응답은 enumeration 방지를
+    위해 user 존재 여부 무관 항상 200 + 동일 본문. 실제 발송은 user 매칭 시에만.
+
+    Rate limit: IP + identifier 조합 (login 과 동일 카운터 기반).
+    """
+    channel = payload.channel.strip().lower()
+    if channel not in ("email", "sms"):
+        raise HTTPException(status_code=400, detail="channel 은 email 또는 sms 이어야 합니다.")
+    identifier = (payload.identifier or "").strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="이메일 또는 전화번호가 필요합니다.")
+
+    client_ip = req.client.host if req.client else "unknown"
+    rate_key = f"pwreset:{client_ip}:{identifier}"
+    await _check_rate_limit_redis(rate_key)
+    _record_login_attempt_inmemory(rate_key)  # rate window 동일
+
+    if channel == "email":
+        stmt = select(User).filter(User.email == identifier, User.is_active == True)
+    else:
+        stmt = select(User).filter(User.phone == identifier, User.is_active == True)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    if user is None or not user.password_hash:
+        # password_hash 없는 (소셜 전용) 계정도 enumeration 방지를 위해 같은 응답.
+        logger.info(f"[pwreset] no match for channel={channel} (generic 200)")
+        return _PASSWORD_RESET_GENERIC_RESPONSE
+
+    # 토큰 생성 — secrets.token_urlsafe(32) = 약 43자 base64url
+    token = secrets.token_urlsafe(32)
+    settings = get_settings()
+    expires_at = datetime.utcnow() + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES)
+    row = PasswordResetToken(
+        id=str(uuid.uuid4()),
+        user_id=user.id,
+        token_hash=_hash_token(token),
+        channel=channel,
+        expires_at=expires_at,
+    )
+    db.add(row)
+    await db.commit()
+
+    reset_url = _build_reset_url(settings, token)
+    try:
+        if channel == "email":
+            html = (
+                f"<p>안녕하세요, {user.name}님.</p>"
+                f"<p>비밀번호 재설정 요청을 받았습니다. 아래 링크를 "
+                f"{PASSWORD_RESET_TTL_MINUTES}분 이내에 클릭해주세요.</p>"
+                f'<p><a href="{reset_url}">비밀번호 재설정하기</a></p>'
+                f"<p>본인이 요청하지 않았다면 이 메일을 무시해주세요.</p>"
+            )
+            text = (
+                f"안녕하세요, {user.name}님.\n\n"
+                f"비밀번호 재설정 링크: {reset_url}\n"
+                f"({PASSWORD_RESET_TTL_MINUTES}분 이내 유효)\n\n"
+                f"본인이 요청하지 않았다면 이 메일을 무시해주세요."
+            )
+            await get_email_provider().send(
+                to=user.email,
+                subject="[Senior Album] 비밀번호 재설정",
+                html=html,
+                text=text,
+            )
+        else:
+            sms_text = (
+                f"[Senior Album] 비밀번호 재설정: {reset_url} "
+                f"({PASSWORD_RESET_TTL_MINUTES}분 이내 유효)"
+            )
+            await get_sms_provider().send(user.phone, sms_text)
+    except Exception as e:
+        # 발송 실패해도 토큰은 살아있어 사용자가 다른 채널로 재시도 가능. 응답은
+        # 동일 200 (enumeration 방지). 운영자 알림용으로 warning 로그만.
+        logger.warning(f"[pwreset] dispatch failed channel={channel}: {e}")
+
+    return _PASSWORD_RESET_GENERIC_RESPONSE
+
+
+@router.post("/password/reset/confirm")
+async def password_reset_confirm(
+    payload: PasswordResetConfirm,
+    db: AsyncSession = Depends(get_db),
+):
+    """T-306: 토큰 + 새 비밀번호로 비밀번호 변경. 1회용 (used_at 박힘).
+
+    구체 사유 (만료 vs 사용됨 vs 잘못된 토큰) 는 응답에서 구분하지 않음 —
+    프론트는 단일 메시지 "토큰이 유효하지 않거나 만료되었습니다" 로 처리.
+    """
+    token = (payload.token or "").strip()
+    new_password = payload.new_password or ""
+    if not token:
+        raise HTTPException(status_code=400, detail="토큰이 필요합니다.")
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="비밀번호는 최소 8자 이상이어야 합니다.")
+
+    token_hash = _hash_token(token)
+    stmt = select(PasswordResetToken).filter(PasswordResetToken.token_hash == token_hash)
+    result = await db.execute(stmt)
+    row = result.scalar_one_or_none()
+
+    now = datetime.utcnow()
+    if row is None or row.used_at is not None or row.expires_at < now:
+        raise HTTPException(
+            status_code=400,
+            detail="토큰이 유효하지 않거나 만료되었습니다.",
+        )
+
+    user_stmt = select(User).filter(User.id == row.user_id, User.is_active == True)
+    user_result = await db.execute(user_stmt)
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        # 토큰 발급 후 계정이 비활성화된 케이스. 동일 generic 메시지.
+        raise HTTPException(
+            status_code=400,
+            detail="토큰이 유효하지 않거나 만료되었습니다.",
+        )
+
+    user.password_hash = hash_password(new_password)
+    row.used_at = now
+    await db.commit()
+
+    logger.info(f"[pwreset] confirmed for user_id={user.id} channel={row.channel}")
+    return {"message": "비밀번호가 변경되었습니다."}

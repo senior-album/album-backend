@@ -90,6 +90,19 @@ class PhoneClaimResponse(BaseModel):
     created_at: datetime
 
 
+class PasswordResetRequest(BaseModel):
+    """T-306: 비밀번호 재설정 요청. channel='email' 이면 identifier=이메일,
+    'sms' 면 phone."""
+    identifier: str
+    channel: str  # email | sms
+
+
+class PasswordResetConfirm(BaseModel):
+    """T-306: 토큰 + 새 비밀번호로 재설정 확정."""
+    token: str
+    new_password: str
+
+
 # ==================== 사용자 관련 스키마 ====================
 
 class UserResponse(BaseModel):
