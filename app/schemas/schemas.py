@@ -260,7 +260,15 @@ class InvitationCreate(BaseModel):
 
 
 class InvitationResponse(BaseModel):
-    """초대 응답"""
+    """초대 응답.
+
+    T-304: invite_url + delivery_status 필드 추가.
+    - invite_url: 초대 수락 페이지 URL. 직원이 복사해 본인 SMS/이메일/메신저로
+      수동 발송 (T-061 알림톡 대행사 연동 / SMTP 미연동 상태에서 정직한 UX).
+    - delivery_status:
+      * "in_app"       — 인앱 알림 레코드 생성됨 (실제 "발송" 도달).
+      * "manual_share" — 백엔드는 발송 안 함, 직원이 invite_url 을 수동 공유.
+    """
     id: str
     facility_id: str
     resident_id: str
@@ -275,6 +283,8 @@ class InvitationResponse(BaseModel):
     facility_name: Optional[str] = None
     resident_name: Optional[str] = None
     created_at: datetime
+    invite_url: Optional[str] = None
+    delivery_status: str = "manual_share"
 
     class Config:
         from_attributes = True

@@ -20,7 +20,6 @@ from app.core.database import get_db
 from app.core.security import get_current_user, get_current_guardian, get_current_staff
 from app.models.models import Invitation, Guardian, Resident, User, Facility, Notification
 from app.schemas.schemas import InvitationCreate, InvitationResponse
-from app.services.biztalk_service import BizTalkService
 from app.services.poster import build_invitation_poster_pdf
 
 logger = logging.getLogger(__name__)
@@ -168,22 +167,13 @@ async def create_invitation(
     )
     await db.commit()
 
-    # 카카오 알림톡 발송 (sms 채널 + 전화번호가 있는 경우만)
-    if invite_type == "sms" and req.phone:
-        try:
-            inviter_stmt = select(User).filter(User.id == current_user["user_id"])
-            inviter_result = await db.execute(inviter_stmt)
-            inviter = inviter_result.scalar_one_or_none()
-
-            await BizTalkService.send_invitation_notification(
-                phone=req.phone,
-                facility_name=facility.name if facility else "시설",
-                resident_name=resident.name,
-                inviter_name=inviter.name if inviter else "직원",
-                message=req.message,
-            )
-        except Exception as e:
-            logger.warning(f"BizTalk notification failed: {e}")
+    # T-304: 알림톡 대행사 (T-061) 미연동 + SMTP 미연동 상태라 sms / email 채널은
+    # 백엔드에서 실제 발송하지 않는다. invite_url 을 응답에 실어 보내 직원이 본인
+    # SMS / 이메일 / 메신저 앱으로 수동 공유하도록 한다 — 가짜 발송 후 200 OK 로
+    # "보냈습니다" 알림하던 이전 동작은 사용자에게 거짓말을 했음 (T-303/T-304 발견).
+    settings = get_settings()
+    invite_url = f"{settings.FRONTEND_URL.rstrip('/')}/invitations/{invitation.id}"
+    delivery_status = "in_app" if invite_type == "in_app" else "manual_share"
 
     return InvitationResponse(
         id=invitation.id,
@@ -200,6 +190,8 @@ async def create_invitation(
         facility_name=facility.name if facility else None,
         resident_name=resident.name,
         created_at=invitation.created_at,
+        invite_url=invite_url,
+        delivery_status=delivery_status,
     )
 
 
