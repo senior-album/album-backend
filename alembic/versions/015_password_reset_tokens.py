@@ -37,12 +37,9 @@ def upgrade() -> None:
         sa.Column("channel", sa.String(length=10), nullable=False),
         sa.Column("expires_at", sa.DateTime(), nullable=False, index=True),
         sa.Column("used_at", sa.DateTime(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
+        # 다른 테이블과 동일하게 Python-side default (model 의 datetime.utcnow) 만
+        # 사용 — server_default 박으면 autogenerate diff 가 매번 떠서 CI 깨짐.
+        sa.Column("created_at", sa.DateTime(), nullable=False),
     )
 
 
