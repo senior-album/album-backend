@@ -121,18 +121,33 @@ async def test_delete_single_photo_with_audit_log(
     """
     PhotoAuditLog 가 1행 이상 있어도 (조회 등으로 audit 가 쌓인 사진) 삭제 시
     함께 정리되고 200. fix 전엔 audit FK 위반으로 500.
+
+    audit row 는 DB 에 직접 insert — view endpoint 경유는 PhotoDetailResponse
+    의 별개 lazy-load 이슈에 걸려서 본 fix 와 무관한 곳에서 깨진다.
     """
-    client, facility_id, _ = staff_session
+    import uuid as _uuid
+    from datetime import datetime
+
+    client, facility_id, user_id = staff_session
     SessionLocal, _ = integration_db
 
     [pid] = await _upload(client, facility_id, n=1)
 
-    # 사진 조회 → PhotoAuditLog action="view" enqueue (T-101)
-    await client.get(f"/photos/{pid}")
+    async with SessionLocal() as s:
+        s.add(
+            PhotoAuditLog(
+                id=str(_uuid.uuid4()),
+                photo_id=pid,
+                action="view",
+                performed_by=user_id,
+                created_at=datetime.utcnow(),
+            )
+        )
+        await s.commit()
 
     async with SessionLocal() as s:
         audits = (await s.execute(select(PhotoAuditLog))).scalars().all()
-        assert len(audits) >= 1, "사진 조회 시 audit row 가 최소 1개 있어야 함"
+        assert len(audits) == 1
 
     resp = await client.delete(f"/photos/{pid}")
     assert resp.status_code == 200, resp.text
