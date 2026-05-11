@@ -14,7 +14,7 @@ import magic
 from PIL import Image as PILImage
 
 from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Query, Request
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.residents import apply_pii_decryption
@@ -30,7 +30,7 @@ from app.core.security import (
     verify_photo_access,
 )
 from app.core.storage import get_storage
-from app.models.models import Photo, PhotoFace, PhotoResident, PhotoLike, PhotoShare, PhotoProcessingJob, PhotoAuditLog, Resident, Guardian, User
+from app.models.models import Photo, PhotoFace, PhotoResident, PhotoLike, PhotoShare, PhotoProcessingJob, PhotoAuditLog, Notification, Resident, Guardian, User
 from app.schemas.schemas import (
     PhotoResponse,
     PhotoDetailResponse,
@@ -868,19 +868,21 @@ async def _delete_photo(photo: Photo, db: AsyncSession, user_id: str):
             except Exception as e:
                 logger.warning(f"[delete] Failed to delete file {key}: {e}")
 
-    # 관련 레코드 삭제 (PhotoResident, PhotoFace, PhotoLike, PhotoShare)
-    for model in [PhotoResident, PhotoFace, PhotoLike, PhotoShare]:
+    # T-314: photos.id 를 가리키는 모든 FK 행을 함께 정리.
+    # photo_audit_logs / photo_processing_jobs 는 NOT NULL FK + ON DELETE 미지정
+    # (RESTRICT) 이라 cleanup 빼면 photo DELETE 시 IntegrityError. notifications
+    # 는 photo_id 가 nullable 이지만 동일하게 RESTRICT 동작하므로 NULL update.
+    # PhotoAuditLog "delete" row 는 보존 의도가 있으면 마이그로 photo_id nullable
+    # + SET NULL 로 가야 함 — 우선 hard delete 로 일관성만 회복.
+    for model in [PhotoResident, PhotoFace, PhotoLike, PhotoShare, PhotoAuditLog, PhotoProcessingJob]:
         stmt = select(model).filter(model.photo_id == photo.id)
         result = await db.execute(stmt)
         for row in result.scalars().all():
             await db.delete(row)
 
-    # 감사 로그 (삭제 이력)
-    db.add(PhotoAuditLog(
-        photo_id=photo.id,
-        action="delete",
-        performed_by=user_id,
-    ))
+    await db.execute(
+        update(Notification).where(Notification.photo_id == photo.id).values(photo_id=None)
+    )
 
     # 사진 레코드 삭제
     await db.delete(photo)
