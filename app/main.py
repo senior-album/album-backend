@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from app.core.config import get_settings
 from app.core.database import Database
 from app.core.logging_config import configure_logging
+from app.core.observability import init_tracing, instrument_sqlalchemy_engine
 from app.core.redis import get_redis, close_redis
 from app.api import auth, facilities, residents, photos, guardians, invitations, kakao_auth, phone_otp, consents, legal, admin, support, users, notifications, wellness_logs, permissions, events, facility_approvals
 
@@ -62,6 +63,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         raise
+
+    # T-122: OTel SQLAlchemy 자동계측은 engine 인스턴스가 필요해서 여기서 wire.
+    # endpoint 미설정 시 no-op (observability.py 가드).
+    try:
+        instrument_sqlalchemy_engine(Database._engine)
+    except Exception as e:
+        logger.warning(f"OTel SQLAlchemy instrumentation failed (continuing): {e}")
 
     # T-020 운영자 부트스트랩 — OPERATOR_EMAIL 매칭 유저를 is_operator=True 로 promote.
     # 운영자가 이미 가입돼 있을 때만 효력. 빈 env / 매칭 없음 / 이미 운영자 모두 silent skip.
@@ -149,6 +157,10 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
     openapi_url="/openapi.json" if settings.DEBUG else None,
 )
+
+# T-122: OpenTelemetry traces 자동계측 등록 (endpoint 미설정 시 no-op).
+# FastAPIInstrumentor 는 app 인스턴스를 받으므로 app 생성 직후 호출.
+init_tracing(app)
 
 # CORS 미들웨어 설정
 # allow_credentials=True와 allow_origins=["*"]는 동시 사용 불가 (RFC 준수)

@@ -32,3 +32,17 @@ insightface
 # reportlab 번들의 UnicodeCIDFont(HYSMyeongJo-Medium) 로 한글 출력 — 별도 TTF 번들 불필요.
 reportlab==4.4.10
 qrcode[pil]==7.4.2
+
+# T-122: OpenTelemetry traces 자동계측 + OTLP gRPC exporter.
+# 런타임 SDK 와 instrumentation 패키지의 버전 라인은 OTel 컨벤션에 따라 분리되어 있다
+# (SDK 1.x.y / instrumentation 0.<x>b<y>) — 같이 패치 올릴 때 라인 일관 유지.
+# OTEL_EXPORTER_OTLP_ENDPOINT 환경변수 미설정 시 app/core/observability.py 가 no-op
+# 으로 빠지므로 본 패키지들이 들어가도 prod 동작에는 영향 없음 (deploy PR 머지 전까지).
+opentelemetry-sdk==1.30.0
+opentelemetry-exporter-otlp-proto-grpc==1.30.0
+opentelemetry-instrumentation-fastapi==0.51b0
+opentelemetry-instrumentation-asyncpg==0.51b0
+opentelemetry-instrumentation-httpx==0.51b0
+opentelemetry-instrumentation-sqlalchemy==0.51b0
+opentelemetry-instrumentation-redis==0.51b0
+opentelemetry-instrumentation-logging==0.51b0
