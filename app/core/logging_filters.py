@@ -60,3 +60,28 @@ class PIIRedactionFilter(logging.Filter):
             record.msg = redacted
             record.args = None
         return True
+
+
+class OtelTraceContextFilter(logging.Filter):
+    """
+    T-318: LogRecord 에 `otelTraceID` / `otelSpanID` attribute 가 항상 존재함을
+    보장.
+
+    배경: OpenTelemetry `LoggingInstrumentor` 는 활성 span context 가 있는
+    경우에만 record 에 두 속성을 setattr 한다. uvicorn access logger 의 호출
+    지점 (`httptools_impl.send`) 은 FastAPI 의 trace context 가 이미 종료된
+    뒤라 두 속성이 LogRecord 에 안 박힌다. 이 상태에서 jsonlogger 의
+    `rename_fields={"otelTraceID": "trace_id", ...}` 가 동작하면
+    `log_record[original]` 직접 접근에서 `KeyError: 'otelTraceID'` 가 떨어져
+    StreamHandler.emit 이 handleError 로 빠지면서 access log 가 traceback
+    으로 stderr 에 dump 된다.
+
+    Handler 에 attach 해야 한다 (Logger 가 아니라) — root logger 의 filter 는
+    propagate 된 child record 에 적용되지 않기 때문.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        for attr in ("otelTraceID", "otelSpanID"):
+            if not hasattr(record, attr):
+                setattr(record, attr, "")
+        return True
