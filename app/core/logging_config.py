@@ -15,12 +15,20 @@ from typing import Iterable
 
 from pythonjsonlogger import jsonlogger
 
-from app.core.logging_filters import PIIRedactionFilter
+from app.core.logging_filters import OtelTraceContextFilter, PIIRedactionFilter
 
 
 _JSON_FORMAT = (
     "%(asctime)s %(levelname)s %(name)s %(message)s "
-    "%(module)s %(funcName)s %(lineno)d"
+    "%(module)s %(funcName)s %(lineno)d "
+    # T-318: 두 OTel 필드를 format string 에 명시적으로 두는 게 핵심.
+    # jsonlogger 2.0.7 의 `_perform_rename_log_fields` 는 `log_record[old]` 가
+    # 항상 존재한다고 가정 (가드 없음). format string 에 있어야 add_fields 의
+    # 첫 루프 (`for field in self._required_fields: log_record[field] = record.__dict__.get(field)`)
+    # 가 key 를 채워주고 rename 단계에서 KeyError 가 안 난다. record 에 attr
+    # 가 없으면 .get() → None 으로 떨어져 `"trace_id": null` 로 직렬화 — 안전.
+    # 추가로 아래 OtelTraceContextFilter 가 None 대신 빈 문자열로 채워 일관성.
+    "%(otelTraceID)s %(otelSpanID)s"
 )
 
 
@@ -52,16 +60,22 @@ def configure_logging(level: int = logging.INFO) -> None:
 
     stream = logging.StreamHandler()
     stream.setFormatter(formatter)
+    # T-318: OtelTraceContextFilter 는 Handler 에 attach 해야 한다.
+    # root logger 에 addFilter 하면 propagate 된 child record (uvicorn.access
+    # 같은) 에 적용되지 않아 `rename_fields` 가 KeyError 로 access log 를
+    # traceback dump 로 깨뜨린다. Handler.handle 은 emit 전에 모든 propagated
+    # record 에 대해 자기 filter 를 돌리므로 안전.
+    stream.addFilter(OtelTraceContextFilter())
     root.addHandler(stream)
 
     # T-103 PII 마스킹 필터 유지
     root.addFilter(PIIRedactionFilter())
 
     # T-122: OTel LoggingInstrumentor (`init_tracing` 활성 시) 가 LogRecord 에
-    # `otelTraceID` / `otelSpanID` 속성을 자동 주입하면 jsonlogger 의 extras
-    # 경로를 통해 JSON 출력에 그대로 포함된다. 위 `rename_fields` 매핑이 두
-    # 키를 `trace_id` / `span_id` 로 변환. tracing 비활성 시에는 두 키가
-    # 출력에서 누락 — Loki 쿼리는 활성 trace 만 매치한다.
+    # `otelTraceID` / `otelSpanID` 속성을 자동 주입한다 — 단 활성 span context
+    # 가 있을 때만. trace 밖 (uvicorn access 등) record 는 위 OtelTraceContextFilter
+    # 가 빈 문자열로 채워준다. 위 `rename_fields` 매핑이 두 키를 `trace_id` /
+    # `span_id` 로 변환해 JSON 출력 (Loki ↔ Tempo 점프 키) 으로 흘려보낸다.
 
     # uvicorn 기본 포맷터가 txt 라 재구성 — propagation 으로 root 에 맡긴다.
     _rewire_uvicorn_loggers(["uvicorn", "uvicorn.error", "uvicorn.access"])
