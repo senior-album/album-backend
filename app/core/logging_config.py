@@ -20,7 +20,15 @@ from app.core.logging_filters import OtelTraceContextFilter, PIIRedactionFilter
 
 _JSON_FORMAT = (
     "%(asctime)s %(levelname)s %(name)s %(message)s "
-    "%(module)s %(funcName)s %(lineno)d"
+    "%(module)s %(funcName)s %(lineno)d "
+    # T-318: 두 OTel 필드를 format string 에 명시적으로 두는 게 핵심.
+    # jsonlogger 2.0.7 의 `_perform_rename_log_fields` 는 `log_record[old]` 가
+    # 항상 존재한다고 가정 (가드 없음). format string 에 있어야 add_fields 의
+    # 첫 루프 (`for field in self._required_fields: log_record[field] = record.__dict__.get(field)`)
+    # 가 key 를 채워주고 rename 단계에서 KeyError 가 안 난다. record 에 attr
+    # 가 없으면 .get() → None 으로 떨어져 `"trace_id": null` 로 직렬화 — 안전.
+    # 추가로 아래 OtelTraceContextFilter 가 None 대신 빈 문자열로 채워 일관성.
+    "%(otelTraceID)s %(otelSpanID)s"
 )
 
 
