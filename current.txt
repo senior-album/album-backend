@@ -124,7 +124,7 @@ starlette==0.37.2
 stringzilla==4.6.0
 sympy==1.14.0
 threadpoolctl==3.6.0
-tifffile==2026.3.3
+tifffile==2026.5.15
 tqdm==4.67.3
 typer==0.24.1
 typing_extensions==4.15.0
