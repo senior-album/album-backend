@@ -30,6 +30,10 @@ _os.environ.setdefault(
 _os.environ.setdefault(
     "RESIDENT_NAME_HMAC_KEY", _base64.b64encode(b"\x43" * 32).decode()
 )
+# T-320 phone 도메인 PII blind-index 키.
+_os.environ.setdefault(
+    "USER_PHONE_HMAC_KEY", _base64.b64encode(b"\x44" * 32).decode()
+)
 # T-004e2: OpenSearchService.hash_resident_id 가 사용. 결정적인 테스트용 키.
 _os.environ.setdefault("OPENSEARCH_LINK_KEY", "t004e-test-link-key-deterministic-aaaa")
 

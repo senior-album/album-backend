@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     RESIDENT_PII_KEK: str = Field(...)  # AES-256-GCM KEK
     RESIDENT_NAME_HMAC_KEY: str = Field(...)  # HMAC-SHA256 blind-index 키
 
+    # T-320 phone 도메인 PII — User/Facility/Invitation/PhoneClaimReport.
+    # KEK 는 RESIDENT_PII_KEK 재사용 (envelope 의 핵심 이점이 KEK 재사용 — T-003-1 결과).
+    # blind-index 키는 도메인별 분리: phone 매칭 전용.
+    USER_PHONE_HMAC_KEY: str = Field(...)  # HMAC-SHA256 blind-index 키 (phone)
+
     # MinIO / S3 (로컬 or 나중에 AWS)
     MINIO_ENDPOINT: str = "localhost:9000"
     MINIO_ACCESS_KEY: str = "minioadmin"

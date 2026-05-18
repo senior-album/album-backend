@@ -31,6 +31,7 @@ _os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret-32bytes-minimu
 _os.environ.setdefault("RESIDENT_PII_KEK", "0" * 64)
 _os.environ.setdefault("RESIDENT_NAME_HMAC_KEY", "1" * 64)
 
+_os.environ.setdefault("USER_PHONE_HMAC_KEY", "2" * 64)
 import uuid
 
 import pytest

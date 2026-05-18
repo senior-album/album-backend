@@ -11,6 +11,7 @@ import os
 os.environ.setdefault("RESIDENT_PII_KEK", base64.b64encode(b"\x01" * 32).decode())
 os.environ.setdefault("RESIDENT_NAME_HMAC_KEY", base64.b64encode(b"\x02" * 32).decode())
 
+os.environ.setdefault("USER_PHONE_HMAC_KEY", base64.b64encode(b"\x12" * 32).decode())
 import pytest
 from cryptography.exceptions import InvalidTag
 
