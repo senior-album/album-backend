@@ -84,7 +84,7 @@ def _reset_crypto_caches():
     try:
         from app.core import crypto
 
-        for fn in ("_kek", "_hmac_key"):
+        for fn in ("_kek", "_hmac_key", "_phone_hmac_key"):
             obj = getattr(crypto, fn, None)
             if obj is not None and hasattr(obj, "cache_clear"):
                 obj.cache_clear()
