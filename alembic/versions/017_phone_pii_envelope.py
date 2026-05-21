@@ -1,7 +1,7 @@
 """T-320-2: User/Facility/Invitation/PhoneClaimReport phone PII envelope encryption
 
-Revision ID: 016_phone_pii_envelope
-Revises: 015_password_reset_tokens
+Revision ID: 017_phone_pii_envelope
+Revises: 016_guardian_user_action_columns
 Create Date: 2026-05-18
 
 T-003 패턴 그대로 phone 도메인에 적용 — 새 ct + bi 컬럼 add + 기존 평문 백필.
@@ -31,8 +31,8 @@ Downgrade: 인덱스 drop + 컬럼 drop. 백필된 ct/bi 데이터는 소실 —
 from alembic import op
 
 
-revision = "016_phone_pii_envelope"
-down_revision = "015_password_reset_tokens"
+revision = "017_phone_pii_envelope"
+down_revision = "016_guardian_user_action_columns"
 branch_labels = None
 depends_on = None
 
