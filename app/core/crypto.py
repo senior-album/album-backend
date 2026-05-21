@@ -1,5 +1,6 @@
 """
 T-003 envelope encryption — Resident PII at-rest 암호화.
+T-320 phone PII at-rest 암호화 — User/Facility/Invitation/PhoneClaimReport.phone.
 
 설계:
 - KEK (Key Encryption Key) 는 SealedSecret 에 1개. KEK 는 DEK 를 wrap 만 함.
@@ -12,6 +13,11 @@ T-003 envelope encryption — Resident PII at-rest 암호화.
 - `dek_wrapped` = nonce(12B) || AESGCM(KEK).encrypt(dek)              — wrapped 32B + 16B tag
 - `name_blind_idx` = HMAC-SHA256(NAME_HMAC_KEY, name_utf8)           — 32B 고정
 
+T-320 phone 변형: 단일 필드 per row 이므로 DEK 미사용 (envelope 없이 KEK 직접 암호화).
+- `phone_ct` = nonce(12B) || AESGCM(KEK).encrypt(normalized_phone_utf8)
+- `phone_bi` = HMAC-SHA256(USER_PHONE_HMAC_KEY, normalized_phone_utf8)
+정규화는 숫자만 추출 (re.sub(r"\\D", "", phone)).
+
 키 디코딩은 lazy + cached. Settings 는 base64 문자열만 들고 있고, 첫 호출 시
 디코드 → 길이 검증 → cache. 잘못된 키는 첫 사용 시점에 ValueError.
 """
@@ -21,6 +27,7 @@ from __future__ import annotations
 import base64
 import hmac
 import os
+import re
 from functools import lru_cache
 from hashlib import sha256
 
@@ -31,6 +38,7 @@ from app.core.config import get_settings
 
 _NONCE_LEN = 12  # AES-GCM 권장 nonce 크기
 _KEY_LEN = 32  # AES-256 / HMAC-SHA256 키 크기
+_PHONE_DIGITS_RE = re.compile(r"\D")
 
 
 @lru_cache(maxsize=1)
@@ -47,6 +55,18 @@ def _hmac_key() -> bytes:
     if len(raw) != _KEY_LEN:
         raise ValueError(f"RESIDENT_NAME_HMAC_KEY 디코드 후 {_KEY_LEN}바이트가 아님 ({len(raw)})")
     return raw
+
+
+@lru_cache(maxsize=1)
+def _phone_hmac_key() -> bytes:
+    raw = base64.b64decode(get_settings().USER_PHONE_HMAC_KEY)
+    if len(raw) != _KEY_LEN:
+        raise ValueError(f"USER_PHONE_HMAC_KEY 디코드 후 {_KEY_LEN}바이트가 아님 ({len(raw)})")
+    return raw
+
+
+def _normalize_phone(value: str) -> str:
+    return _PHONE_DIGITS_RE.sub("", value or "")
 
 
 def generate_dek() -> bytes:
@@ -75,3 +95,28 @@ def decrypt_field(blob: bytes, dek: bytes) -> str:
 
 def blind_index(value: str) -> bytes:
     return hmac.new(_hmac_key(), value.encode("utf-8"), sha256).digest()
+
+
+def encrypt_phone(plaintext: str) -> bytes:
+    """T-320 phone PII — KEK 직접 암호화 (envelope DEK 미사용, 단일 필드 per row).
+
+    plaintext 는 정규화 전 원문도 허용 — 함수가 숫자만 추출해서 암호화한다.
+    빈 문자열이나 None 입력 시 ValueError (callers 가 가드해야 함).
+    """
+    normalized = _normalize_phone(plaintext)
+    if not normalized:
+        raise ValueError("encrypt_phone: 정규화 후 빈 문자열")
+    nonce = os.urandom(_NONCE_LEN)
+    return nonce + AESGCM(_kek()).encrypt(nonce, normalized.encode("utf-8"), None)
+
+
+def decrypt_phone(blob: bytes) -> str:
+    """phone_ct 디코드 — 결과는 항상 normalized digits-only."""
+    nonce, ct = blob[:_NONCE_LEN], blob[_NONCE_LEN:]
+    return AESGCM(_kek()).decrypt(nonce, ct, None).decode("utf-8")
+
+
+def phone_blind_index(value: str) -> bytes:
+    """phone 비교용 blind-index — 정규화 후 HMAC."""
+    normalized = _normalize_phone(value)
+    return hmac.new(_phone_hmac_key(), normalized.encode("utf-8"), sha256).digest()

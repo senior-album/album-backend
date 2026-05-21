@@ -21,6 +21,7 @@ import types as _types
 # .env 가 있으면 setdefault 가 no-op — 그쪽 값을 그대로 쓴다.
 os.environ.setdefault("RESIDENT_PII_KEK", base64.b64encode(b"\x07" * 32).decode())
 os.environ.setdefault("RESIDENT_NAME_HMAC_KEY", base64.b64encode(b"\x08" * 32).decode())
+os.environ.setdefault("USER_PHONE_HMAC_KEY", base64.b64encode(b"\x18" * 32).decode())
 os.environ.setdefault("JWT_SECRET", "test-secret-value-for-jwt-32-bytes-min")
 os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret-32bytes-minimum")
 

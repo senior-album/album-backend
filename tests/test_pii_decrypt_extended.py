@@ -17,6 +17,7 @@ import types as _types
 # 유효한 32-byte base64 키 — 실제 decrypt 가 동작해야 의미 있는 검증.
 _os.environ.setdefault("RESIDENT_PII_KEK", base64.b64encode(b"\x09" * 32).decode())
 _os.environ.setdefault("RESIDENT_NAME_HMAC_KEY", base64.b64encode(b"\x0a" * 32).decode())
+_os.environ.setdefault("USER_PHONE_HMAC_KEY", base64.b64encode(b"\x1a" * 32).decode())
 _os.environ.setdefault("JWT_SECRET", "test-secret-value-for-jwt-32-bytes-min")
 _os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret-32bytes-minimum")
 

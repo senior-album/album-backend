@@ -29,6 +29,7 @@ _os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret-32bytes-minimu
 _os.environ.setdefault("RESIDENT_PII_KEK", _b64.b64encode(b"\x11" * 32).decode())
 _os.environ.setdefault("RESIDENT_NAME_HMAC_KEY", _b64.b64encode(b"\x22" * 32).decode())
 
+_os.environ.setdefault("USER_PHONE_HMAC_KEY", _b64.b64encode(b"\x32" * 32).decode())
 import uuid
 from datetime import date
 

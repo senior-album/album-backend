@@ -19,6 +19,7 @@ _os.environ.setdefault("JWT_SECRET", "test-secret-value-for-jwt-32-bytes-min")
 _os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret-32bytes-minimum")
 _os.environ.setdefault("RESIDENT_PII_KEK", "0" * 64)
 _os.environ.setdefault("RESIDENT_NAME_HMAC_KEY", "1" * 64)
+_os.environ.setdefault("USER_PHONE_HMAC_KEY", "2" * 64)
 # T-004e2: hash_resident_id 가 사용. 테스트용 결정적 키.
 _os.environ.setdefault("OPENSEARCH_LINK_KEY", "t004e2-test-link-key-deterministic-aaaa")
 

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     Column, String, Integer, Float, Date, DateTime, Text, Boolean, ForeignKey, JSON,
-    LargeBinary, UniqueConstraint,
+    LargeBinary, UniqueConstraint, event,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -20,6 +20,10 @@ class Facility(Base):
     name = Column(String(255), nullable=False, index=True)
     address = Column(String(500), nullable=False)
     phone = Column(String(20), nullable=True, default="")
+    # T-320 phone PII envelope encryption — dual-write 단계.
+    # phone plain 컬럼은 호환 위해 유지 (T-320-Z 에서 drop 예정).
+    phone_ct = Column(LargeBinary, nullable=True)
+    phone_bi = Column(LargeBinary, nullable=True, index=True)
     code = Column(String(20), unique=True, nullable=False, index=True)
 
     staff = relationship("User", back_populates="facility", foreign_keys="[User.facility_id]")
@@ -54,6 +58,10 @@ class User(Base):
     # OTP 인증 성공 시 갱신. UNIQUE — 한 번호는 한 계정에만 매핑 (사칭/오등록 방지).
     # 재인증 정책: phone_verified_at 이 OTP_REVERIFY_AFTER_DAYS 경과 시 게이트가 재인증 요구.
     phone = Column(String(20), unique=True, nullable=True)
+    # T-320 phone PII envelope encryption — dual-write 단계.
+    # UNIQUE 는 T-320-Z plaintext drop 시 phone_bi 로 이전 예정.
+    phone_ct = Column(LargeBinary, nullable=True)
+    phone_bi = Column(LargeBinary, nullable=True, index=True)
     phone_verified_at = Column(DateTime, nullable=True)
     push_token = Column(String(500), nullable=True)
     notification_enabled = Column(Boolean, default=True)
@@ -151,6 +159,9 @@ class Invitation(Base):
     resident_id = Column(String(36), ForeignKey("residents.id"), nullable=False, index=True)
     invite_type = Column(String(20), nullable=False, default="sms", index=True)
     phone = Column(String(20), nullable=True, index=True)  # 보호자 핸드폰 번호 (sms 채널)
+    # T-320 phone PII envelope encryption — dual-write 단계.
+    phone_ct = Column(LargeBinary, nullable=True)
+    phone_bi = Column(LargeBinary, nullable=True, index=True)
     email = Column(String(255), nullable=True, index=True)  # 보호자 이메일 (sms 채널 보조)
     invitee_user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)  # in_app 채널
     relationship_type = Column(String(50), nullable=True)
@@ -554,6 +565,9 @@ class PhoneClaimReport(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     reporter_user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     claimed_phone = Column(String(20), nullable=False, index=True)
+    # T-320 phone PII envelope encryption — dual-write 단계.
+    claimed_phone_ct = Column(LargeBinary, nullable=True)
+    claimed_phone_bi = Column(LargeBinary, nullable=True, index=True)
     note = Column(Text, nullable=False, default="")
     # pending | reviewed | resolved | rejected — 운영자 어드민에서 갱신
     status = Column(String(20), nullable=False, default="pending", index=True)
@@ -575,3 +589,43 @@ class PasswordResetToken(Base):
     expires_at = Column(DateTime, nullable=False, index=True)
     used_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# T-320 phone PII dual-write 자동화
+#
+# 평문 phone 컬럼이 set 될 때 ct/bi 컬럼도 함께 채운다. plaintext 컬럼은 T-320-Z
+# 에서 drop 예정이라 본 hook 은 한시적 — drop 시 hook 도 제거하고 callers 가
+# phone_ct/phone_bi 를 직접 setter 로 채우도록 한다 (apply_phone_encryption helper).
+#
+# 빈 문자열 / None / 공백 phone 은 ct/bi 모두 NULL — 미인증 사용자끼리 충돌 X.
+# ---------------------------------------------------------------------------
+
+
+def _sync_phone_columns(target, plain_attr: str, ct_attr: str, bi_attr: str) -> None:
+    from app.core.crypto import encrypt_phone, phone_blind_index, _normalize_phone
+
+    value = getattr(target, plain_attr, None)
+    normalized = _normalize_phone(value) if value else ""
+    if normalized:
+        setattr(target, ct_attr, encrypt_phone(normalized))
+        setattr(target, bi_attr, phone_blind_index(normalized))
+    else:
+        setattr(target, ct_attr, None)
+        setattr(target, bi_attr, None)
+
+
+def _on_phone_change(mapper, connection, target):
+    _sync_phone_columns(target, "phone", "phone_ct", "phone_bi")
+
+
+def _on_claim_phone_change(mapper, connection, target):
+    _sync_phone_columns(target, "claimed_phone", "claimed_phone_ct", "claimed_phone_bi")
+
+
+for _model in (User, Facility, Invitation):
+    event.listen(_model, "before_insert", _on_phone_change)
+    event.listen(_model, "before_update", _on_phone_change)
+
+event.listen(PhoneClaimReport, "before_insert", _on_claim_phone_change)
+event.listen(PhoneClaimReport, "before_update", _on_claim_phone_change)
