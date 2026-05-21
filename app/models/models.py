@@ -201,6 +201,10 @@ class Photo(Base):
     original_url = Column(String(500), nullable=False)
     thumbnail_url = Column(String(500), nullable=True)
 
+    # T-325: 같은 시설 내 동일 파일 중복 업로드 차단용 SHA-256 hex digest. (facility_id,
+    # file_hash) composite 인덱스는 마이그 018 에서. 기존 row 는 backfill 전 NULL.
+    file_hash = Column(String(64), nullable=True)
+
     is_processed = Column(Boolean, default=False)
     processing_status = Column(String(50), default="pending")
     is_public = Column(Boolean, default=False, index=True)  # 보호자에게 공개 여부 (직원이 승인)

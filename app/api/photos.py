@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import hashlib
 import os
 import uuid
 import secrets
@@ -249,12 +250,17 @@ async def _enrich_photos_with_residents(
 
 
 async def _upload_one_to_storage(
-    file: UploadFile,
+    file_data: bytes,
+    original_filename: str,
     storage,
     facility_id: str,
 ) -> dict:
     """
     사진 1장의 storage 측 처리 (DB 무관 부분).
+
+    T-325: 호출자가 미리 file.read() + SHA-256 hash 계산을 마치고 들어온다.
+    중복 차단을 storage 업로드 전에 단일 batch DB 쿼리로 처리해 MinIO 에 orphan
+    파일이 남지 않도록 분리됨 (그래서 시그니처가 UploadFile 대신 pre-read bytes).
 
     asyncio.gather 로 N 장이 동시에 실행됨. 무거운 작업 분리:
     - PIL 디코딩/재인코딩/섬네일 → asyncio.to_thread (CPU bound, GIL release)
@@ -264,10 +270,8 @@ async def _upload_one_to_storage(
     Raises: 검증 실패 / 인코딩 실패 / 업로드 실패 시 예외 — gather 호출자가
     return_exceptions=True 로 받아 개별 실패만 스킵.
     """
-    file_data = await file.read()
-
-    ext, sniffed_mime = _validate_upload(file.filename or "", file_data)
-    original_filename = file.filename or f"photo{ext}"
+    ext, sniffed_mime = _validate_upload(original_filename, file_data)
+    original_filename = original_filename or f"photo{ext}"
 
     # PIL decode 1회로 reencode + 섬네일 (T-051 EXIF strip 동일 보장).
     sanitized_data, sanitized_ext, sanitized_mime, thumb_data = await asyncio.to_thread(
@@ -342,24 +346,72 @@ async def upload_photos(
 
     storage = get_storage()
 
-    # 1) Storage 측 작업을 사진별 동시 실행. return_exceptions=True 로 일부 실패도 나머지 계속.
+    # T-325: Phase 1 — 모든 파일 미리 read + SHA-256 hash 계산 (CPU 만, 빠름).
+    # storage 업로드 전에 단일 DB 쿼리로 dup check 해야 MinIO 에 중복 orphan 안 남음.
+    file_payloads: list[tuple[str, bytes, str]] = []
+    for f in files:
+        data = await f.read()
+        digest = hashlib.sha256(data).hexdigest()
+        file_payloads.append((f.filename or "photo.jpg", data, digest))
+
+    # T-325: Phase 2 — 같은 시설 + 같은 hash 의 기존 사진 batch 조회.
+    payload_hashes = [h for _, _, h in file_payloads]
+    existing_map: dict[str, str] = {}
+    if payload_hashes:
+        existing_q = await db.execute(
+            select(Photo.id, Photo.file_hash).filter(
+                Photo.facility_id == facility_id,
+                Photo.file_hash.in_(payload_hashes),
+            )
+        )
+        for row in existing_q:
+            existing_map[row.file_hash] = row.id
+
+    # T-325: Phase 3 — DB dup + batch 안 동일 hash 둘 다 걸러 [신규 / 중복] 분리.
+    duplicates: list[dict] = []
+    new_payloads: list[tuple[str, bytes, str]] = []
+    seen_in_batch: dict[str, str] = {}  # hash → filename (first occurrence)
+    for filename, data, digest in file_payloads:
+        if digest in existing_map:
+            duplicates.append({
+                "filename": filename,
+                "file_hash": digest,
+                "existing_photo_id": existing_map[digest],
+                "reason": "duplicate_in_facility",
+            })
+        elif digest in seen_in_batch:
+            duplicates.append({
+                "filename": filename,
+                "file_hash": digest,
+                "duplicate_of_filename": seen_in_batch[digest],
+                "reason": "duplicate_in_batch",
+            })
+        else:
+            seen_in_batch[digest] = filename
+            new_payloads.append((filename, data, digest))
+
+    # T-325: Phase 4 — storage 업로드는 신규만. file.read() 는 phase 1 에서 끝났음.
     storage_results = await asyncio.gather(
-        *[_upload_one_to_storage(f, storage, facility_id) for f in files],
+        *[
+            _upload_one_to_storage(data, filename, storage, facility_id)
+            for filename, data, _ in new_payloads
+        ],
         return_exceptions=True,
     )
 
-    # 2) DB 쓰기는 단일 세션을 공유하므로 직렬. storage 작업이 모두 끝난 뒤에만 진행.
+    # Phase 5 — DB 쓰기는 단일 세션 공유라 직렬. storage 결과 끝난 뒤에만.
     uploaded_photos: list[Photo] = []
     created_jobs: list[PhotoProcessingJob] = []
 
-    for file, result in zip(files, storage_results):
+    for (filename, _, digest), result in zip(new_payloads, storage_results):
         if isinstance(result, BaseException):
-            logger.error(f"Photo upload failed for {file.filename}: {result}", exc_info=result)
+            logger.error(f"Photo upload failed for {filename}: {result}", exc_info=result)
             continue
 
         photo = Photo(
             id=str(uuid.uuid4()),
             facility_id=facility_id,
+            file_hash=digest,
             original_url=result["object_key"],
             thumbnail_url=result["thumb_key"],
             is_processed=False,
@@ -384,11 +436,21 @@ async def upload_photos(
             logger.warning(f"Job creation skipped (table missing?): {job_err}")
 
     if not uploaded_photos:
-        # 모든 사진이 storage 단계에서 실패한 경우.
+        # 두 케이스:
+        # 1) new_payloads 가 비어있음 — 전부 중복.
+        # 2) new_payloads 는 있었는데 모두 storage 단계에서 실패.
+        if duplicates and not new_payloads:
+            return {
+                "message": f"{len(duplicates)}장 모두 이미 업로드된 사진입니다.",
+                "photos": [],
+                "jobs": [],
+                "duplicates": duplicates,
+            }
         return {
             "message": "0장의 사진이 업로드되었습니다. 모두 실패.",
             "photos": [],
             "jobs": [],
+            "duplicates": duplicates,
         }
 
     try:
@@ -401,8 +463,17 @@ async def upload_photos(
     for photo in uploaded_photos:
         logger.info(f"Photo queued for processing: {photo.id}")
 
+    # T-325: bulk 부분 성공 시 메시지에 중복 건수 포함.
+    if duplicates:
+        message = (
+            f"{len(uploaded_photos)}장의 사진이 업로드되었습니다. "
+            f"중복 {len(duplicates)}장은 건너뜀. 분류 처리 중..."
+        )
+    else:
+        message = f"{len(uploaded_photos)}장의 사진이 업로드되었습니다. 분류 처리 중..."
+
     return {
-        "message": f"{len(uploaded_photos)}장의 사진이 업로드되었습니다. 분류 처리 중...",
+        "message": message,
         "photos": [
             {
                 "id": p.id,
@@ -413,6 +484,7 @@ async def upload_photos(
             for p in uploaded_photos
         ],
         "jobs": [{"job_id": j.id, "status": j.status} for j in created_jobs],
+        "duplicates": duplicates,
     }
 
 
