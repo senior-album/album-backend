@@ -161,9 +161,16 @@ def _validate_upload(filename: str, data: bytes) -> tuple[str, str]:
 
 
 async def _enrich_photos_with_residents(
-    photos: list[Photo], db: AsyncSession, current_user_id: str = None
+    photos: list[Photo], db: AsyncSession, current_user_id: str = None,
+    include_faces: bool = True,
 ) -> list[PhotoResponse]:
-    """Photo 목록에 matched_residents + like 정보를 채워서 PhotoResponse 리스트로 반환"""
+    """Photo 목록에 matched_residents + like 정보를 채워서 PhotoResponse 리스트로 반환.
+
+    T-324: include_faces=True 이면 PhotoFace bbox + resident_name + confidence 도 묶어
+    응답에 노출 (직원용 동선 — 섬네일/라이트박스 시각 디버깅). 보호자 동선은
+    include_faces=False 로 호출해 다른 입소자 정보 누출을 막는다 (`is_rejected=True` 는
+    항상 제외).
+    """
     if not photos:
         return []
 
@@ -194,6 +201,28 @@ async def _enrich_photos_with_residents(
             )
         )
 
+    # T-324: photo_id 별 얼굴 감지 결과 — 거부된 얼굴은 제외, resident 가 매핑된 경우
+    # 이름 라벨 동반. opensearch embedding_id 같은 내부 디버깅 키는 PhotoFaceResponse
+    # 자체가 노출 안 함.
+    faces_map: dict[str, list] = {}
+    if include_faces:
+        from app.schemas.schemas import PhotoFaceResponse
+        face_stmt = (
+            select(PhotoFace, Resident)
+            .outerjoin(Resident, PhotoFace.resident_id == Resident.id)
+            .filter(
+                PhotoFace.photo_id.in_(photo_ids),
+                PhotoFace.is_rejected == False,  # noqa: E712
+            )
+        )
+        face_rows = (await db.execute(face_stmt)).all()
+        for face, resident in face_rows:
+            face_resp = PhotoFaceResponse.model_validate(face)
+            if resident is not None:
+                apply_pii_decryption(resident)
+                face_resp.resident_name = resident.name
+            faces_map.setdefault(face.photo_id, []).append(face_resp)
+
     # 좋아요 수 한번에 조회
     like_counts_stmt = (
         select(PhotoLike.photo_id, func.count(PhotoLike.id))
@@ -219,8 +248,22 @@ async def _enrich_photos_with_residents(
 
     responses = []
     for p in photos:
-        resp = PhotoResponse.model_validate(p)
+        # T-324: `model_validate(p, from_attributes=True)` 는 PhotoResponse 의 `faces`
+        # 필드 이름이 SQLAlchemy `Photo.faces` 관계와 충돌 → 비동기 컨텍스트에서 lazy
+        # load 트리거되어 MissingGreenlet 발생. 명시적 kwarg 생성자로 회피.
+        resp = PhotoResponse(
+            id=p.id,
+            facility_id=p.facility_id,
+            resident_id=p.resident_id,
+            original_url=p.original_url,
+            thumbnail_url=p.thumbnail_url,
+            is_processed=p.is_processed,
+            processing_status=p.processing_status,
+            created_at=p.created_at,
+            is_public=p.is_public,
+        )
         resp.matched_residents = photo_residents_map.get(p.id, [])
+        resp.faces = faces_map.get(p.id, [])
         resp.like_count = like_counts_map.get(p.id, 0)
         resp.liked_by_me = p.id in my_likes_set
         # PhotoResident가 없는 경우 기존 resident_id에서 fallback. T-003-3: full
@@ -463,6 +506,9 @@ async def get_photo(
     사진 상세 조회 (얼굴 감지 결과 포함).
 
     T-101: 인증 사용자가 조회할 때 PhotoAuditLog에 view 액션으로 기록.
+    T-324: faces[] 에 bbox + resident_name + confidence — 직원만 (보호자는
+    `is_guardian=True` 일 때 noexpose 처리, 같은 photo 라이트박스 라도 다른 입소자
+    bbox 는 노출 안 함).
     """
     stmt = select(Photo).filter(Photo.id == photo_id)
     result = await db.execute(stmt)
@@ -482,7 +528,21 @@ async def get_photo(
     )
     await db.commit()
 
-    return PhotoDetailResponse.model_validate(photo)
+    # T-324: 보호자 (`role=guardian`) 면 faces 노출 안 함 — 다른 입소자 bbox 가 같은
+    # 사진에 있으면 PII 누출. 직원·운영자는 include_faces=True 로 전체 enrichment.
+    is_guardian = current_user.get("role") == "guardian"
+    enriched = await _enrich_photos_with_residents(
+        [photo], db,
+        current_user_id=current_user["user_id"],
+        include_faces=not is_guardian,
+    )
+    if not enriched:
+        # _enrich_photos_with_residents 가 빈 리스트 반환하는 케이스는 photos 가
+        # 빈 리스트일 때뿐. 위에서 단건 select 결과 photo 가 None 아닌 게 보장됨.
+        raise HTTPException(status_code=500, detail="Photo enrichment failed")
+    base = enriched[0]
+    # PhotoDetailResponse 는 PhotoResponse 와 필드 동일 (T-324) — model_dump 로 복제.
+    return PhotoDetailResponse.model_validate(base.model_dump())
 
 
 @router.get("/facility/{facility_id}", response_model=list[PhotoResponse])
@@ -552,7 +612,22 @@ async def get_guardian_photos(
     )
     result = await db.execute(photo_stmt)
     photos = result.scalars().all()
-    return [PhotoResponse.model_validate(p) for p in photos]
+    # T-324: 보호자 동선이라 faces 노출 안 함 (PhotoResponse 기본값 [] 유지).
+    # model_validate(p) 는 Photo.faces 관계 lazy load 를 트리거하므로 명시적 kwarg.
+    return [
+        PhotoResponse(
+            id=p.id,
+            facility_id=p.facility_id,
+            resident_id=p.resident_id,
+            original_url=p.original_url,
+            thumbnail_url=p.thumbnail_url,
+            is_processed=p.is_processed,
+            processing_status=p.processing_status,
+            created_at=p.created_at,
+            is_public=p.is_public,
+        )
+        for p in photos
+    ]
 
 
 @router.get("/debug/opensearch-status")

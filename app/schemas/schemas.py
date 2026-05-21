@@ -373,6 +373,9 @@ class PhotoResponse(BaseModel):
     created_at: datetime
     # 다대다: 이 사진에 매칭된 모든 입소자
     matched_residents: List[MatchedResidentInfo] = []
+    # T-324: 직원용 응답에만 채워진다 (보호자 경로는 default 인 빈 리스트 유지).
+    # `is_rejected=True` 얼굴은 미포함. 좌표는 원본 이미지 px 기준.
+    faces: List["PhotoFaceResponse"] = []
     is_public: bool = False
     # 좋아요
     like_count: int = 0
@@ -383,8 +386,8 @@ class PhotoResponse(BaseModel):
 
 
 class PhotoDetailResponse(PhotoResponse):
-    """사진 상세 응답"""
-    faces: List["PhotoFaceResponse"] = []
+    """사진 상세 응답 — PhotoResponse 와 동일하지만 별도 type 으로 유지 (라우터 분기용)."""
+    pass
 
 
 class PhotoFaceResponse(BaseModel):
@@ -392,6 +395,9 @@ class PhotoFaceResponse(BaseModel):
     id: str
     photo_id: str
     resident_id: Optional[str] = None
+    # T-324: 직원이 매칭 결과를 시각적으로 검증할 수 있게 라벨용 이름 포함.
+    # 보호자 응답에는 노출 안 함 (다른 입소자 bbox 가 같은 사진에 있으면 PII 누출).
+    resident_name: Optional[str] = None
     bbox_x1: float
     bbox_y1: float
     bbox_x2: float
@@ -403,6 +409,10 @@ class PhotoFaceResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+PhotoResponse.model_rebuild()
+PhotoDetailResponse.model_rebuild()
 
 
 class FaceReviewRequest(BaseModel):
