@@ -30,6 +30,7 @@ from app.core.security import (
     REFRESH_COOKIE_NAME,
 )
 from app.core.redis import check_rate_limit, clear_rate_limit
+from app.core.crypto import phone_blind_index
 from app.models.models import (
     User, Facility, Resident, Guardian, RefreshToken,
     ConsentDocument, UserConsent, PasswordResetToken,
@@ -87,7 +88,9 @@ async def _ensure_phone_available(db: AsyncSession, phone: str | None) -> None:
     """
     if not phone:
         return
-    stmt = select(User.id).filter(User.phone == phone).limit(1)
+    # T-320-3: blind-index 매칭. phone_blind_index 가 정규화 후 HMAC 하므로
+    # 하이픈/공백 입력도 그대로 통과. 평문 컬럼은 T-320-Z drop 예정.
+    stmt = select(User.id).filter(User.phone_bi == phone_blind_index(phone)).limit(1)
     if (await db.execute(stmt)).scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail=_PHONE_DUP_DETAIL)
 
@@ -750,7 +753,10 @@ async def password_reset_request(
     if channel == "email":
         stmt = select(User).filter(User.email == identifier, User.is_active == True)
     else:
-        stmt = select(User).filter(User.phone == identifier, User.is_active == True)
+        # T-320-3: phone 매칭은 blind-index 로 — `phone_blind_index` 가 정규화 포함.
+        stmt = select(User).filter(
+            User.phone_bi == phone_blind_index(identifier), User.is_active == True
+        )
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
 

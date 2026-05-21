@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.residents import apply_pii_decryption
 from app.core.audit import admin_audit
 from app.core.config import get_settings
+from app.core.crypto import phone_blind_index
 from app.core.database import get_db
 from app.core.security import get_current_user, get_current_guardian, get_current_staff
 from app.models.models import Invitation, Guardian, Resident, User, Facility, Notification
@@ -106,9 +107,12 @@ async def create_invitation(
     if invite_type == "in_app":
         dup_filters.append(Invitation.invitee_user_id == req.invitee_user_id)
     elif req.phone and req.email:
-        dup_filters.append(or_(Invitation.phone == req.phone, Invitation.email == req.email))
+        # T-320-3: phone 은 blind-index 매칭 (이메일은 평문 그대로).
+        dup_filters.append(
+            or_(Invitation.phone_bi == phone_blind_index(req.phone), Invitation.email == req.email)
+        )
     elif req.phone:
-        dup_filters.append(Invitation.phone == req.phone)
+        dup_filters.append(Invitation.phone_bi == phone_blind_index(req.phone))
     else:
         dup_filters.append(Invitation.email == req.email)
 
@@ -319,10 +323,11 @@ async def get_my_invitations(
     if not user:
         return []
 
-    # 전화번호 / 이메일 / 본인 계정 ID 매칭
+    # 전화번호 / 이메일 / 본인 계정 ID 매칭.
+    # T-320-3: user 의 phone_bi 와 invitation 의 phone_bi 직접 비교 — decrypt + re-HMAC 우회.
     match_conditions = [Invitation.invitee_user_id == user.id]
-    if user.phone:
-        match_conditions.append(Invitation.phone == user.phone)
+    if user.phone_bi:
+        match_conditions.append(Invitation.phone_bi == user.phone_bi)
     if user.email:
         match_conditions.append(Invitation.email == user.email)
 
@@ -385,7 +390,8 @@ async def accept_invitation(
     user_result = await db.execute(user_stmt)
     user = user_result.scalar_one_or_none()
 
-    phone_match = user and user.phone and invitation.phone and user.phone == invitation.phone
+    # T-320-3: phone_bi 직접 비교 (양쪽 decrypt 회피).
+    phone_match = user and user.phone_bi and invitation.phone_bi and user.phone_bi == invitation.phone_bi
     email_match = user and user.email and invitation.email and user.email == invitation.email
     user_match = user and invitation.invitee_user_id and invitation.invitee_user_id == user.id
     if not phone_match and not email_match and not user_match:

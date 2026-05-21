@@ -151,6 +151,35 @@ async def test_password_reset_request_sms_creates_token(
 
 
 @pytest.mark.asyncio
+async def test_password_reset_request_sms_normalizes_hyphenated_identifier(
+    integration_client, integration_db, monkeypatch
+):
+    """T-320-3: bi 매칭이 정규화를 포함하므로 하이픈 포함 입력도 같은 사용자에 매칭."""
+    from app.api import auth as auth_module
+
+    sent: list[tuple[str, str]] = []
+
+    class _StubSms:
+        async def send(self, phone, message):
+            sent.append((phone, message))
+
+    monkeypatch.setattr(auth_module, "get_sms_provider", lambda: _StubSms())
+
+    _SL, session = integration_db
+    user = await _seed_user(session, email="x@y.io", phone="01012345678")
+
+    resp = await integration_client.post(
+        "/auth/password/reset/request",
+        json={"identifier": "010-1234-5678", "channel": "sms"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    rows = (await session.execute(select(PasswordResetToken))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].user_id == user.id
+
+
+@pytest.mark.asyncio
 async def test_password_reset_request_unknown_user_returns_generic_200(
     integration_client, integration_db, monkeypatch
 ):

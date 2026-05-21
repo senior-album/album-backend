@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crypto import phone_blind_index
 from app.core.database import get_db
 from app.core.security import get_current_staff
 from app.models.models import User
@@ -98,12 +99,9 @@ async def search_user(
                 status_code=400,
                 detail="전화번호 또는 이메일 형식으로 입력해주세요.",
             )
-        # 저장 포맷이 일관되지 않을 수 있어 (하이픈 유무) 양쪽 다 시도.
-        # 다만 005 마이그레이션 이후로는 OTP 인증 경로에서 정규화돼 들어오므로
-        # 사실상 digits 만 매칭. 하이픈 포맷도 fallback 으로 허용.
-        stmt = select(User).filter(
-            (User.phone == digits) | (User.phone == q)
-        )
+        # T-320-3: blind-index 단일 비교로 통합. `phone_blind_index` 가 정규화 후
+        # HMAC 하므로 하이픈 유무 모두 같은 키로 매칭 — 옛 `digits|q` OR 도 불필요.
+        stmt = select(User).filter(User.phone_bi == phone_blind_index(q))
 
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
