@@ -75,7 +75,7 @@ networkx==3.6.1
 numpy==1.26.4
 onnx==1.21.0
 onnxruntime==1.18.0
-opencv-contrib-python==4.11.0.86
+opencv-contrib-python==4.13.0.92
 opencv-python-headless==4.11.0.86
 opensearch-py==2.7.1
 opt_einsum==3.4.0
