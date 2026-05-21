@@ -127,6 +127,11 @@ class Guardian(Base):
     approved_at = Column(DateTime, nullable=True)
     reject_reason = Column(String(500), nullable=True)
 
+    # T-323: 보호자 본인 액션. cancelled_at 은 pending 신청 본인 취소 (soft delete),
+    # hidden_from_user_at 은 rejected 신청을 본인 화면에서만 숨긴 시각 (감사 이력은 보존).
+    cancelled_at = Column(DateTime, nullable=True)
+    hidden_from_user_at = Column(DateTime, nullable=True)
+
     facility = relationship("Facility", foreign_keys=[facility_id])
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 

@@ -37,7 +37,10 @@ async def get_pending_guardians(
     current_user: dict = Depends(get_current_staff),
     db: AsyncSession = Depends(get_db),
 ):
-    """승인 대기 중인 보호자 목록 (직원/관리자용)"""
+    """승인 대기 중인 보호자 목록 (직원/관리자용)
+
+    T-323: 보호자 본인이 취소한 (`cancelled_at != NULL`) 신청은 pending 목록에서 제외.
+    """
     from sqlalchemy.orm import aliased
     stmt = (
         select(Guardian, User, Resident)
@@ -47,6 +50,7 @@ async def get_pending_guardians(
             Guardian.facility_id == facility_id,
             Guardian.is_approved == False,
             Guardian.is_rejected == False,
+            Guardian.cancelled_at.is_(None),
         )
         .order_by(desc(Guardian.created_at))
     )
@@ -215,11 +219,13 @@ async def request_facility_connection(
     if not facility:
         raise HTTPException(status_code=404, detail="유효하지 않은 시설 코드입니다.")
 
-    # 이미 해당 시설에 대기/승인 중인 요청이 있는지 확인
+    # 이미 해당 시설에 대기/승인 중인 요청이 있는지 확인.
+    # T-323: 본인이 취소한 (`cancelled_at != NULL`) 신청은 active 로 보지 않아 재신청 허용.
     dup_stmt = select(Guardian).filter(
         Guardian.user_id == current_user["user_id"],
         Guardian.facility_id == facility.id,
         Guardian.is_rejected == False,
+        Guardian.cancelled_at.is_(None),
     )
     dup_result = await db.execute(dup_stmt)
     existing = dup_result.scalar_one_or_none()
@@ -250,17 +256,97 @@ async def request_facility_connection(
     }
 
 
+@router.delete("/me/connect/{guardian_id}")
+async def cancel_my_connection_request(
+    guardian_id: str,
+    current_user: dict = Depends(get_current_guardian),
+    db: AsyncSession = Depends(get_db),
+):
+    """T-323: 보호자 본인이 대기 중인 시설 연결 요청을 취소.
+
+    pending (`is_approved=False && is_rejected=False && cancelled_at IS NULL`) 상태일 때만
+    가능. 승인 / 거부된 신청에는 동작 안 함 (별도 엔드포인트로 처리).
+
+    soft delete — `cancelled_at` 만 박고 row 는 보존해 감사 이력을 남긴다.
+    같은 시설 재신청을 위해 unique 제약은 없음 (취소된 row 는 dup check 에서 제외).
+    """
+    stmt = select(Guardian).filter(
+        Guardian.id == guardian_id,
+        Guardian.user_id == current_user["user_id"],
+    )
+    result = await db.execute(stmt)
+    guardian = result.scalar_one_or_none()
+    if not guardian:
+        raise HTTPException(status_code=404, detail="신청을 찾을 수 없습니다.")
+
+    if guardian.cancelled_at is not None:
+        # 멱등 — 이미 취소된 신청.
+        return {"message": "이미 취소된 신청입니다.", "guardian_id": guardian_id}
+    if guardian.is_approved:
+        raise HTTPException(status_code=400, detail="이미 승인된 연결은 취소할 수 없습니다.")
+    if guardian.is_rejected:
+        raise HTTPException(
+            status_code=400,
+            detail="이미 거부된 신청은 취소할 수 없습니다. 화면에서 숨기려면 dismiss 를 사용하세요.",
+        )
+
+    guardian.cancelled_at = datetime.utcnow()
+    await db.commit()
+    return {"message": "신청이 취소되었습니다.", "guardian_id": guardian_id}
+
+
+@router.post("/me/{guardian_id}/dismiss")
+async def dismiss_my_rejected_request(
+    guardian_id: str,
+    current_user: dict = Depends(get_current_guardian),
+    db: AsyncSession = Depends(get_db),
+):
+    """T-323: 보호자가 거부된 신청을 본인 화면에서 숨김.
+
+    거부 (`is_rejected=True`) 된 신청만 대상. 감사 이력은 보존 — `hidden_from_user_at` 만
+    박고 시설 측 `/guardians/facility/{id}/all` 응답에는 그대로 노출된다.
+    """
+    stmt = select(Guardian).filter(
+        Guardian.id == guardian_id,
+        Guardian.user_id == current_user["user_id"],
+    )
+    result = await db.execute(stmt)
+    guardian = result.scalar_one_or_none()
+    if not guardian:
+        raise HTTPException(status_code=404, detail="신청을 찾을 수 없습니다.")
+
+    if guardian.hidden_from_user_at is not None:
+        # 멱등 — 이미 숨김 처리됨.
+        return {"message": "이미 숨김 처리된 신청입니다.", "guardian_id": guardian_id}
+    if not guardian.is_rejected:
+        raise HTTPException(
+            status_code=400,
+            detail="거부된 신청만 숨길 수 있습니다.",
+        )
+
+    guardian.hidden_from_user_at = datetime.utcnow()
+    await db.commit()
+    return {"message": "신청이 숨김 처리되었습니다.", "guardian_id": guardian_id}
+
+
 @router.get("/me/status")
 async def get_my_approval_status(
     current_user: dict = Depends(get_current_guardian),
     db: AsyncSession = Depends(get_db),
 ):
-    """보호자 승인 상태 확인 (다중 시설/입소자 지원)"""
+    """보호자 승인 상태 확인 (다중 시설/입소자 지원)
+
+    T-323: 본인이 취소한 신청 / 거부된 후 본인이 숨긴 신청은 응답에서 제외.
+    """
     stmt = (
         select(Guardian, Resident, Facility)
         .outerjoin(Resident, Guardian.resident_id == Resident.id)
         .join(Facility, Guardian.facility_id == Facility.id)
-        .filter(Guardian.user_id == current_user["user_id"])
+        .filter(
+            Guardian.user_id == current_user["user_id"],
+            Guardian.cancelled_at.is_(None),
+            Guardian.hidden_from_user_at.is_(None),
+        )
     )
     result = await db.execute(stmt)
     rows = result.all()
