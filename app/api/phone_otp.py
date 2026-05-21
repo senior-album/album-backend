@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.crypto import phone_blind_index
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import User
@@ -76,9 +77,10 @@ async def verify_phone_otp(
     except OtpVerifyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # 다른 계정이 이미 그 phone 으로 등록돼있는지 사전 검사 (race 는 commit 의 IntegrityError 가 잡음)
+    # 다른 계정이 이미 그 phone 으로 등록돼있는지 사전 검사 (race 는 commit 의 IntegrityError 가 잡음).
+    # T-320-3: blind-index 매칭으로 전환 — phone 은 위에서 _validate_phone 으로 이미 정규화.
     dup_stmt = select(User).filter(
-        User.phone == phone,
+        User.phone_bi == phone_blind_index(phone),
         User.id != current_user["user_id"],
     )
     if (await db.execute(dup_stmt)).scalar_one_or_none():
