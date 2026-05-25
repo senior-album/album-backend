@@ -31,7 +31,7 @@ fastapi==0.111.0
 fastapi-cli==0.0.24
 firebase-admin==6.5.0
 flatbuffers==25.12.19
-fonttools==4.62.1
+fonttools==4.63.0
 google-api-core==2.30.3
 google-api-python-client==2.194.0
 google-auth==2.49.2
