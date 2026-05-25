@@ -30,7 +30,7 @@ insightface
 
 # T-032: 보호자 초대 QR 포스터 PDF 생성.
 # reportlab 번들의 UnicodeCIDFont(HYSMyeongJo-Medium) 로 한글 출력 — 별도 TTF 번들 불필요.
-reportlab==4.4.10
+reportlab==4.5.1
 qrcode[pil]==7.4.2
 
 # T-122: OpenTelemetry traces 자동계측 + OTLP gRPC exporter.
